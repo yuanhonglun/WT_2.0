@@ -5,11 +5,11 @@ import logging
 class DatabaseBuilder:
     def __init__(self, mgf_file, product_ion_db, noise_threshold=200):
         """
-        初始化数据库构建类。
+        Initialize the database construction class.
 
-        :param mgf_file: MGF 文件路径
-        :param product_ion_db: 产品离子数据库路径
-        :param noise_threshold: 噪音阈值
+        :param mgf_file: Path of the MGF file
+        :param product_ion_db: Path of the product ion database
+        :param noise_threshold: Noise threshold
         """
         self.mgf_file = mgf_file
         self.product_ion_db = product_ion_db
@@ -18,7 +18,7 @@ class DatabaseBuilder:
 
     def find_cycles(self):
         """
-        根据 MGF 文件动态生成 Q3_cycles。
+        Generate Q3_cycles dynamically based on the MGF file.
         """
         max_cycles = 0
         try:
@@ -38,27 +38,27 @@ class DatabaseBuilder:
 
     def create_tables(self, Q3_cycles):
         """
-        创建数据库中的必要表格，包括 `intensity_data`、`mz_data` 和 `rt_data`。
+        Create the necessary tables in the database, including `intensity_data`, `mz_data` and `rt_data`.
         """
         try:
             conn = sqlite3.connect(self.product_ion_db)
             c = conn.cursor()
 
-            # 创建 intensity_data 表
+            # Create the "intensity_data" table
             c.execute('''CREATE TABLE IF NOT EXISTS intensity_data (
                             pepmass REAL,
                             mz_bin TEXT,
                             {}
                         )'''.format(", ".join([f"cycle{i} REAL" for i in range(1, Q3_cycles + 1)])))
 
-            # 创建 mz_data 表
+            # Create the mz_data table
             c.execute('''CREATE TABLE IF NOT EXISTS mz_data (
                             pepmass REAL,
                             mz_bin TEXT,
                             {}
                         )'''.format(", ".join([f"cycle{i} REAL" for i in range(1, Q3_cycles + 1)])))
 
-            # 创建 rt_data 表
+            # Create the rt_data table
             c.execute('''CREATE TABLE IF NOT EXISTS rt_data (
                             pepmass REAL PRIMARY KEY,
                             {}
@@ -131,7 +131,7 @@ class DatabaseBuilder:
 
     def find_rt_in_seconds(self, Q3_cycles):
         """
-        提取 RT 数据并返回。
+        Extract the RT data and return it.
         """
         rt_data = {}
         pepmass = None
@@ -162,7 +162,7 @@ class DatabaseBuilder:
 
     def fill_missing_values(self, rt_data):
         """
-        填补缺失的 RT 数据。
+        Fill in the missing RT data.
         """
         for pepmass, rt_seconds_list in rt_data.items():
             start_index = 0
@@ -186,7 +186,7 @@ class DatabaseBuilder:
 
     def insert_rt_data(self, rt_data, Q3_cycles):
         """
-        将 RT 数据插入到 rt_data 表。
+        Insert the RT data into the rt_data table.
         """
         try:
             conn = sqlite3.connect(self.product_ion_db)
@@ -208,13 +208,13 @@ class DatabaseBuilder:
 
     def build_db(self):
         """
-        构建数据库，创建表格并插入数据。
+        Build the database, create the tables and insert the data.
         """
         try:
-            Q3_cycles = self.find_cycles()  # 根据 MGF 文件内容生成 Q3_cycles
+            Q3_cycles = self.find_cycles()  # Generate Q3_cycles based on the content of the MGF file
             self.create_tables(Q3_cycles)
             self.insert_mz_data_to_database(Q3_cycles)
-            # 处理 RT 数据并插入
+            # Process RT data and insert
             rt_data = self.find_rt_in_seconds(Q3_cycles)
             rt_data = self.fill_missing_values(rt_data)
             self.insert_rt_data(rt_data, Q3_cycles)
@@ -242,10 +242,10 @@ class DatabaseBuilder:
         return pepmass_list
 
     def getMaxIntensity1(self, df):
-        # 0123列分别为intensity1, intensity2, mz1, mz2
-        # 获取0、1列的最大值
+        # Columns 0, 1, 2, and 3 are respectively "intensity1", "intensity2", "mz1", and "mz2"
+        # Obtain the maximum values of columns 0 and 1
         df['intensity'] = df[[0, 1]].max(axis=1)
-        # 根据0、1列的最大值确定要合并的列
+        # Determine the columns to be merged based on the maximum values in the 0 and 1 columns
         df['mz'] = df.apply(lambda row: row[2] if row['intensity'] == row[0] else row[3], axis=1)
 
         df.drop(columns=[0, 1, 2, 3], inplace=True)

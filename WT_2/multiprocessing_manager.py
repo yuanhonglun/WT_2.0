@@ -11,20 +11,20 @@ from WT_2.remove_duplicate import ResultFormatter
 class MultiprocessingManager:
     def __init__(self, outer_max_workers, inner_max_workers, mgf_folder, out_dir, RT_start=30, RT_end=720, fp_wid=6, fp_sigma=2, fp_min_noise=200, group_wid=6, group_sigma=0.5):
         """
-        初始化多进程管理类
+        Initialize the multi-process management class
 
-        :param outer_max_workers: 外层进程池最大工作进程数（处理多个MGF文件）
-        :param inner_max_workers: 内层进程池最大工作进程数（处理文件夹内多个pepmass）
-        :param mgf_folder: 单个样本文件夹路径，文件夹下包括多个MGF文件
-        :param product_ion_db: 产品离子数据库路径
-        :param out_dir: 输出路径
+        :param outer_max_workers: Maximum number of working processes in the outer process pool (for processing multiple MGF files)
+        :param inner_max_workers: The maximum number of working processes in the inner process pool (for processing multiple pepmasses within a folder)
+        :param mgf_folder: The path of a single sample folder, with multiple MGF files contained within the folder.
+        :param product_ion_db: Product ion database path
+        :param out_dir: Output path
         """
-        self.outer_max_workers = outer_max_workers  # 外层进程池最大工作进程数
-        self.inner_max_workers = inner_max_workers  # 内层进程池最大工作进程数
-        self.mgf_folder = mgf_folder  # 文件夹路径
-        self.out_dir = out_dir  # 输出路径
+        self.outer_max_workers = outer_max_workers  # Maximum number of working processes in the outer process pool
+        self.inner_max_workers = inner_max_workers  # Maximum number of working processes in the inner process pool
+        self.mgf_folder = mgf_folder  # Folder Path
+        self.out_dir = out_dir  # Output Path
 
-        #峰识别参数
+        # Peak Identification Parameters
         self.RT_start = RT_start
         self.RT_end = RT_end
         self.fp_wid = fp_wid
@@ -36,9 +36,9 @@ class MultiprocessingManager:
 
     def process_mgf_files(self):
         """
-        外层多进程：处理文件夹下的多个 MGF 文件，每个文件通过内层进程池并行处理 pepmass。
+        Outer multi-process: Handles multiple MGF files in the folder, and each file is processed in parallel by the inner process pool for pepmass.
         """
-        # 获取文件夹中的所有 MGF 文件
+        # Obtain all MGF files in the folder
         mgf_files = [os.path.join(self.mgf_folder, file) for file in os.listdir(self.mgf_folder) if
                      file.endswith(".mgf")]
 
@@ -55,11 +55,11 @@ class MultiprocessingManager:
 
     def process_mgf_file(self, mgf_file):
         """
-        处理单个 MGF 文件，进行数据库构建、峰值提取、峰值分组等操作。
+        Process a single MGF file, perform operations such as database construction, peak extraction, and peak grouping.
         """
         print(f"Processing MGF file: {mgf_file}")
         
-        # 创建数据库构建类并构建数据库
+        # Create the database construction class and build the database
         os.makedirs(os.path.join(self.out_dir, 'db'), exist_ok=True)
         os.makedirs(os.path.join(self.out_dir, 'result'), exist_ok=True)
 
@@ -71,12 +71,12 @@ class MultiprocessingManager:
         if not os.path.exists(product_ion_db):
             self.db_builder.build_db()
 
-        # 假设从数据库中提取了需要的 DataFrame（intensity_df, mz_df, rt_df）
-        # 现在处理每个 MGF 文件中的多个 pepmass
+        # Suppose the required DataFrames (intensity_df, mz_df, rt_df) have been extracted from the database.
+        # Now, we are processing multiple pepmasses in each MGF file.
         total_peak_df, total_peak_group_df = self.process_pepmass_in_file(mgf_file, product_ion_db)
         total_peak_df["height/width"] = total_peak_df["apex_raw_intensity"] / total_peak_df["peak_width"]
 
-        # 生成每个peak group的质谱图
+        # Generate the mass spectra for each peak group
         total_peak_df = total_peak_df[total_peak_df['apex_raw_intensity'] != 0]
         fr = ResultFormatter(total_peak_df)
         total_peak_group_df = fr.format_results()
@@ -86,11 +86,11 @@ class MultiprocessingManager:
 
     def process_pepmass_in_file(self, mgf_file, product_ion_db):
         """
-        内层多进程：处理每个 MGF 文件中的多个 pepmass。
+        Inner multi-process: Handles multiple pepmasses within each MGF file.
         """
         print(f"Processing pepmass in MGF file: {mgf_file}")
 
-        # 从数据库中提取了 pepmass 列表
+        # The pepmass list was extracted from the database
         pepmass_list = self.db_builder.get_pepmass_list(product_ion_db)
 
         total_peak_df = pd.DataFrame(
@@ -99,7 +99,7 @@ class MultiprocessingManager:
                      "peak_width", "prominences"])
         total_peak_group_df = pd.DataFrame(columns=["pepmass", "index", "RT"])
 
-        # 使用内层 ProcessPoolExecutor 并行处理 pepmass_list
+        # Use the inner ProcessPoolExecutor to process pepmass_list in parallel
         with ProcessPoolExecutor(max_workers=self.inner_max_workers) as executor:
             future_to_pepmass = {executor.submit(self.process_pepmass, pepmass, product_ion_db): pepmass for pepmass in pepmass_list}
             for future in as_completed(future_to_pepmass):
@@ -109,13 +109,13 @@ class MultiprocessingManager:
                     total_peak_df = pd.concat([total_peak_df, peak_df], ignore_index=True)
                     total_peak_group_df = pd.concat([total_peak_group_df, peak_group_df], ignore_index=True)
                 except Exception as exc:
-                    print(f'处理 pepmass {pepmass} 时发生异常: {exc}')
+                    print(f'An exception occurred while processing pepmass {pepmass}: {exc}')
 
         return total_peak_df, total_peak_group_df
 
     def process_pepmass(self, pepmass, product_ion_db):
         """
-        处理每个 pepmass 的数据，进行峰值提取、去重、计算等操作。
+        Process the data of each pepmass, perform peak extraction, deduplication, calculation and other operations.
         """
         print(f"Processing pepmass {pepmass}...")
 

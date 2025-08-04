@@ -8,8 +8,8 @@ from WT_2.samplealigment import aligment
 class SampleQuantity:
     def __init__(self, quantity_folder, quantity_out_path, ref_file=None, useHrMs1=True, uesSampleAligmentmodel=True, SampleAligmentmodel_path=None):
         """
-        :param quantity_folder: 单个样本去重整合后的P3结果，统一放入的result目录
-        :param quantity_out_path: 输出定量结果
+        :param quantity_folder: The P3 result after duplicate removal and consolidation of a single sample, uniformly placed in the "result" directory
+        :param quantity_out_path: Output of quantitative results
 
         """
         try:
@@ -45,9 +45,9 @@ class SampleQuantity:
     def peak_alignment(self, ref_sample, other_sample_list, threshold, RT_window=24):
         '''
 
-        峰对齐score=2a/2a+b+c, 如果RT window内待对齐的peak group跟所有reference peak group的得分均低于阈值，
-        则该待对齐的peak group作为一个新的reference peak group，
-        加到reference peak group中，最后形成一个df，行名是样品，列名是peak group，每个单元格是MS 2数据
+        Peak alignment score = 2a / (2a + b + c). If the peak groups to be aligned within the RT window have scores lower than the threshold for all reference peak groups,
+        then this group of peak to be aligned becomes a new reference peak group,
+        and is added to the reference peak group. Finally, a df is formed, with sample names as rows and peak group names as columns, and each cell contains MS2 data.
         '''
 
         reference_sample_groups = pd.read_csv(os.path.join(self.quantity_folder, ref_sample),
@@ -106,27 +106,27 @@ class SampleQuantity:
                     score = max_score_row["score"]
                     if score > max_score and score >= threshold:
                         max_score = score
-                        # 改为返回 namedtuple
+
                         best_son_group = next(son_df.loc[[max_score_row['label']]].itertuples())
 
                 else:
                     for son_group in son_df.itertuples():
                         reference_mz = filter_ms2_spectra(son_group.formatted_info)
                         b, c, a, _ = filter_unique_mz(np.array(reference_mz), np.array(mz))
-                        # 模型替代相似性计算，且可选择用什么方法算相似性
+
                         score = 2 * a / (2 * a + b + c)
 
-                        # 如果 score 大于 max_score 且大于 threshold，更新 best_son_group
+                        # If the score is greater than max_score and also greater than the threshold, update the best_son_group
                         if score > max_score and score >= threshold:
                             max_score = score
                             best_son_group = son_group
 
-                # 如果找到了一个符合条件的最佳 son_group
+                # If a suitable "son_group" that meets the requirements is found
                 if best_son_group is not None:
                     sample_df.loc[best_son_group.Index, :] = list(group)[1:]
 
                 else:
-                    # 如果没有符合条件的 best_son_group，将当前 group 计入 unmatched_groups
+                    # If there is no corresponding best_son_group, include the current group in the unmatched_groups.
                     unmatched_groups.append(group)
 
             if unmatched_groups:
@@ -149,8 +149,8 @@ class SampleQuantity:
     def quantitative_ion_select(self, df):
 
         '''
-        取每列各MS2所含离子的交集，计算出交集离子的平均响应，取平均响应最大的ion作为该列所有group的定量ion
-        ，其余group也用该定量离子，计算出该ion的峰高，若某group无所选ion，则先填0。每列计算完成后，取该列最小值，将0值替换为最小值的1/10
+        Take the intersection of the ions contained in each MS2 column, calculate the average response of the intersecting ions, and select the ion with the highest average response as the quantitative ion for all groups in that column.
+        For the remaining groups, also use this quantitative ion. Calculate the peak height of this ion. If a certain group has no selected ion, fill in 0 first. After each column is calculated, take the minimum value of that column, and replace the 0 values with 1/10 of the minimum value.
         '''
 
         best_mz_list = []
@@ -163,7 +163,7 @@ class SampleQuantity:
             intensity_values = []
 
             for info in formatted_info:
-                # 检查信息是否为有效字符串
+
 
                 if pd.notna(info):
                     mz, intensity = parse_mz_intensity(info)
@@ -236,12 +236,11 @@ class SampleQuantity:
         :param RT: RT
         :param peaks: MS2
         :param df: son_df
-        :return: 峰对齐模型输入的df
+        :return: The df input for the peak alignment model
         '''
         result_rows = []
 
         for i, row in df.iterrows():
-            # 创建新行数据
 
             new_row = {
                 'left_data_MS1': None,
@@ -258,15 +257,11 @@ class SampleQuantity:
         return result_df
 
     def _spilit_best_intensity_set(self, df, sample_list):
-        #拆分best_intensity_set列为每个样本一列
+        # Split the "best_intensity_set" column into one column for each sample
         split_data = df['best_intensity_set'].str.split(';', expand=True)
         split_data.columns = [x.split('.csv')[0] for x in sample_list]
         df = pd.concat([df, split_data], axis=1)
         return df
 
-
-
-# s = SampleQuantity(r"D:\work\WT2.0\WT_2\test_data\result\result", ".", ref_file=None, useHrMs1=True, uesSampleAligmentmodel=True, SampleAligmentmodel_path="../test_data/model/samplealigment.pth")
-# s.quantity_processor()
 
 

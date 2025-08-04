@@ -10,8 +10,8 @@ import logging
 class Deduplicator:
     def __init__(self, peak_result_dir, msdial_out_path, sample_name, useHrMs1=False, HrMs1model_path=None):
         """
-        :param peak_result_dir: feature提取完成后的result目录
-        :param msdial_out_path: MSDIAL导出文件
+        :param peak_result_dir: The directory for the result after feature extraction
+        :param msdial_out_path: The exported file from MSDIAL
 
         """
         try:
@@ -31,7 +31,7 @@ class Deduplicator:
     def remove_msdial_duplicate(self):
 
         """
-            去除MSDIAL中P1P2的重复，主接口
+            Remove the duplicates of P1P2 in MSDIAL, main interface
         """
 
         try:
@@ -46,22 +46,22 @@ class Deduplicator:
                 product_ion_peak = os.path.join(self.peak_result_dir, f'{file_name}_product_ion_peak_df.csv')
                 clean_p3 = self.all_remove_type1(self.msdial_out_path, file, product_ion_peak, file_name)
                 self.all_clean_p3 = pd.concat([self.all_clean_p3, clean_p3])
-                #print(file_name, "一二级匹配完成")
+
 
                 ms2_peak = pd.read_csv(product_ion_peak, sep=",", index_col=0)
                 self.all_ms2_peak = pd.concat([self.all_ms2_peak, ms2_peak])
 
             self.all_clean_p3.to_csv(os.path.join(self.peak_result_dir, "all_p3.csv"))
             self.all_ms2_peak.to_csv(os.path.join(self.peak_result_dir, "all_ms2_peak.csv"))
-            #print("全部一二级匹配完成")
+
         except Exception as e:
             logging.error(f"Error while removing MSDIAL duplicates: {e}")
-            raise  # 重新抛出异常
+            raise  # Re-throw the exception
 
     def filter_p3_group(self):
 
         '''
-        功能：得到所有的p3group后，只保留peak_df中有效的碎片信息。然后筛选出所有的大于3碎片的group
+        Function: After obtaining all the p3groups, only retain the valid fragment information in the peak_df. Then, filter out all the groups with more than 3 fragments.
         '''
 
 
@@ -90,7 +90,7 @@ class Deduplicator:
             new_format_good_real_p3_group.to_csv(p3_group_outpath)
 
 
-            #print(f'{self.peak_result_dir} p3 ion 大于3的feature 数量为{num_groups_filtered}')
+
             return p3_peak_outpath, p3_group_outpath
 
         except Exception as e:
@@ -102,7 +102,7 @@ class Deduplicator:
 
     def all_remove_type1(self, Q1_file, raw_peak_group_file, ms2_peak_df, file_name):
         """
-            先去同位素再匹配MSDIAL一级，留下P3
+            First, go to the isotopes and then match with MSDIAL level 1, leaving P3
         """
         try:
             ms1_peak = pd.read_csv(Q1_file, sep=",", index_col=0)
@@ -137,15 +137,14 @@ class Deduplicator:
 
     def new_isotope_removal(self, ms2_peak_group, ms2_peak_df):
         '''
-        功能：去同位素
-
-        找X的潜在同位素group时，以mz±6，RT±0.05为切片，找到潜在同位素group，如果没有group则continue
-        切片中删掉完整离子数量大于X完整离子数量的group，删后无group则continue
-        X先取最大响应20%以上的离子，如果离子数量大于10则只取前10个
-        这些离子去剩余group中算占比得分，计算时，X有100，Y有100或101，都算匹配上，Y的离子不删减，为完整离子
-        占比得分=匹配上离子数/参与计算的X的离子数
-        得到匹配得分后，判断参与计算离子数是否小于等于5，若是，则阈值为0.6，否则阈值为0.5
-        大于等于阈值，认为该group为X的同位素
+        Function: Remove isotopes
+        When searching for the potential isotopic groups of X, slice the data with mz ± 6 and RT ± 0.05. Identify the potential isotopic groups. If no group is found, continue.
+        Delete the groups in the slice that have more complete ions than X's complete ions. If there are no groups after deletion, continue.
+        First, select the ions with a response greater than 20% of X. If the number of ions is greater than 10, only take the first 10.
+        Calculate the proportion score for these ions in the remaining groups. When X has 100 and Y has 100 or 101, both are considered as a match. The ions of Y are not deleted and are regarded as complete ions.
+        Proportion score = Number of matched ions / Number of X ions involved in the calculation
+        After obtaining the matching score, determine whether the number of participating ions is less than or equal to 5. If yes, the threshold is 0.6; otherwise, the threshold is 0.5.
+        If it is greater than or equal to the threshold, consider this group as an isotope of X.
 
         '''
 
@@ -204,14 +203,12 @@ class Deduplicator:
     def match_ms1_ms2(self, ms2_peak_group, ms1_peak, ms2_peak):
 
         '''
-        功能: 匹配WT2 group与MSDIAL group
-
-        匹配的时候，如果WT2 group与MSDIAL group的交集ion数量/WT2 group数量 > 0.5，或交集ion数量/MSDIAL group ion数量 > 0.5
-        离子数量小于等于5，阈值提高为0.6
-        才认为是对上
-
-        与P1匹配的时候，先根据mz和RT切片，得到待比较的group（如果无group，直接作为P3），计算上述的相似性，取得分最高的group卡上，如果多个group得分相同，算反向余弦相似性（谁ion少以谁为基准），取得分最高的group卡上
-        卡的时候阈值是上述阈值
+        Function: Match WT2 group with MSDIAL group
+        When matching, if the ratio of the number of common ions between the WT2 group and the MSDIAL group / the number of ions in the WT2 group > 0.5, or the ratio of the number of common ions between the WT2 group and the MSDIAL group / the number of ions in the MSDIAL group > 0.5
+        and the number of ions is less than or equal to 5, the threshold is raised to 0.6
+        then it is considered to be correct.
+        When matching with P1, first slice based on mz and RT to obtain the groups to be compared (if there are no groups, directly use P3). Calculate the aforementioned similarity and select the group card with the highest score. If multiple groups have the same score, calculate the inverse cosine similarity (with the one having the smaller ion value as the reference), and select the group card with the highest score.
+        The threshold for this process is the aforementioned threshold.
         '''
 
         try:
@@ -275,11 +272,11 @@ class Deduplicator:
                                     best_row = row
 
                             if best_row is not None:
-                                match_result.append(list(row.values))  # 将最佳行添加到匹配结果
+                                match_result.append(list(row.values))
                     else:
-                        match_result.append([0] * ms1_peak.shape[1])  # 如果没有匹配，填充零行
+                        match_result.append([0] * ms1_peak.shape[1])
                 else:
-                    match_result.append([0] * ms1_peak.shape[1])  # 没有匹配行，填充零行
+                    match_result.append([0] * ms1_peak.shape[1])
 
             ms2_peak_group = pd.concat([ms2_peak_group, pd.DataFrame(match_result)], axis=1)
             if self.useHrMs1:
@@ -291,7 +288,7 @@ class Deduplicator:
 
         except Exception as e:
             logging.error(f"Error in matching MS1 and MS2 peaks: {e}")
-            raise  # 重新抛出异常
+            raise
 
     def get_more_max20_ions(self, ms2_peak_df):
         max_value = ms2_peak_df['apex_raw_intensity'].max()
@@ -321,9 +318,8 @@ class Deduplicator:
 class ResultFormatter:
     def __init__(self, df, expended=False):
         """
-        设定结果文件格式
-
-        :param df: 来自Deduplicator去重后的df
+        Set the format of the result file
+        :param df: The df obtained after deduplication by Deduplicator
         """
         try:
             self.df = df
@@ -335,7 +331,7 @@ class ResultFormatter:
 
     def format_results(self):
         """
-        整理分组结果，生成新的DataFrame，包含格式化的准确m/z和强度信息。
+        Sort the grouped results and generate a new DataFrame, which includes the formatted and accurate m/z and intensity information.
         """
         grouped = self.df.groupby(['pepmass', 'group']).agg(
             apex_RT_mean=('apex_RT', 'mean'),
@@ -356,11 +352,11 @@ class ResultFormatter:
                 'count': row['count']
             }
             new_row['formatted_info'] = self._generate_formatted_info(accurate_mz,
-                                                                apex_raw_intensity)  # 为了生成Q3:Q3_intensity Q4:Q4_intensity一列
+                                                                apex_raw_intensity)  # To generate the column of Q3:Q3_intensity and Q4:Q4_intensity
 
             if self.expended:
                 new_row = self._generate_ourself_info(new_row, accurate_mz,
-                                                apex_raw_intensity)  # 为了生成Q3\tQ3_intensity\tQ4\tQ4_intensity多列
+                                                apex_raw_intensity)  # To generate multiple columns of Q3, Q3_intensity, Q4, and Q4_intensity.
 
             result_rows.append(new_row)
 
@@ -369,7 +365,7 @@ class ResultFormatter:
 
     def _generate_ourself_info(self, new_row, accurate_mz, apex_raw_intensity):
         '''
-                功能：对p3 group生成类似Q3,Q3_intensity,Q4,Q4_intensity......格式表格
+                Function: Generate a table in the format of Q3, Q3_intensity, Q4, Q4_intensity... for the p3 group.
         '''
 
         sorted_indices = sorted(range(len(apex_raw_intensity)), key=lambda i: apex_raw_intensity[i], reverse=True)
@@ -383,7 +379,7 @@ class ResultFormatter:
 
     def _generate_formatted_info(self, accurate_mz, apex_raw_intensity):
         '''
-            功能：对p3 group生成类似MSDIAL格式的表格
+            Function: Generate a table similar to the MSDIAL format for the p3 group
         '''
 
         formatted_info = []

@@ -43,7 +43,7 @@ def aligment(df, model_path=None):
 
     predictions = []
 
-    with torch.no_grad():  # 不计算梯度, 节省内存和加快速度
+    with torch.no_grad():
         for left, right, left_rt, right_rt, label in dataloader:
             left, right = left.to(device), right.to(device)
             left_rt, right_rt = left_rt.to(device), right_rt.to(device)
@@ -56,9 +56,3 @@ def aligment(df, model_path=None):
     predictions_list = predictions.tolist()
 
     return predictions_list
-
-
-# import pandas as pd
-# df = pd.read_csv(r"D:\work\WT2.0\peakalignment\test_siamese_training_data.csv")
-# p = aligment(df)
-# print(p)

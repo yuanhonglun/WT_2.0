@@ -6,10 +6,9 @@ import logging
 class MspGenerator:
     def __init__(self, p3_peak_group_df, msp_file_path, useHrMs1=False):
         """
-        导出MSP文件，单样本或多样本对齐后均可
-
-        :param p3_peak_group_df: 去重后的p3 group结果, 包括pepmass group apex_RT_mean formatted_info(Q3:Q3_intensity Q4:Q4_intensity)列
-        :param msp_file_path: MSP导出文件
+        Export the MSP file. It can be done for either a single sample or multiple samples after alignment.
+        :param p3_peak_group_df: De-duplicated p3 group results, including columns such as 'pepmass group apex_RT_mean', 'formatted_info(Q3:Q3_intensity)', 'Q4:Q4_intensity'
+        :param msp_file_path: MSP export file
 
         """
 
@@ -40,7 +39,7 @@ class MspGenerator:
                 name_line = f"NAME: {i}|pepmass={pepmass}|group={str(group)}"
                 msp_contents.append(name_line)
 
-                # 写入PRECURSORMZ和RETENTIONTIME行
+
                 if self.useHrMs1:
                     msp_contents.append(f"PRECURSORMZ: {row.HR_pepmass}")
                 else:
@@ -52,18 +51,18 @@ class MspGenerator:
                 msp_contents.append("INCHIKEY: null")
                 msp_contents.append("SMILES: null")
                 msp_contents.append("COMMENT: null")
-                # 写入Num Peaks行
+
                 msp_contents.append(f"Num Peaks: {len(mz_list)}")
 
-                # 写入每行的accurate_mz和apex_raw_intensity
+
                 for mz, i in zip(mz_list, intensity_list):
                     mz_intensity_line = f"{mz}\t{i}"
                     msp_contents.append(mz_intensity_line)
 
-                # 添加一个空行分隔不同的条目
+
                 msp_contents.append('')
                 i += 1
-            # 将所有内容一次性写入MSP文件
+
             with open(self.msp_file_path, 'w') as f:
                 f.write('\n'.join(msp_contents))
         except Exception as e:
@@ -80,11 +79,10 @@ class MspFileLibraryMatcher:
 
 
         """
-        MSP格式比库
-
-        :param query_msp_path: 需比库文件路径
-        :param library_msp_path: 库文件路径
-
+        MSP format versus library
+        :param query_msp_path: The path of the query library file
+        :param library_msp_path: The path of the library file
+        :param out_path: The path of the output txt file
         """
 
         try:
@@ -105,16 +103,16 @@ class MspFileLibraryMatcher:
         library_spectrums, l_Q1_list = self.filter_spectrums(library_spectrums)
 
         with open(self.out_path, "w", encoding='utf-8') as f:
-            f.write('query name,library name,positive score,reverse score,average score\n')
+            f.write('query name\tlibrary name\tpositive score\treverse score\taverage score\n')
             count_flag = 0
             for q in query_spectrums:
                 count_flag += 1
 
-                #print(f'{count_flag}个结束')
+
                 if 'precursor_mz' in q.metadata:
                     q_mz, q_i, q_Q1 = q.mz, q.intensities, q.metadata['precursor_mz']
                     idx_list = self.find_indices_within_range(l_Q1_list, q_Q1)
-                    scores = []  # 存储所有的 ave_score 和对应的名称
+                    scores = []
 
                     if idx_list:
                         for idx in idx_list:
@@ -141,12 +139,12 @@ class MspFileLibraryMatcher:
 
                     scores = sorted(scores, key=lambda x: x[0], reverse=True)[:self.num]
                     for score in scores:
-                        f.write(f'{score[1]},{score[2]},{score[3]},{score[4]},{score[0]}\n')
+                        f.write(f'{score[1]}\t{score[2]}\t{score[3]}\t{score[4]}\t{score[0]}\n')
 
 
 
     def filter_intensity_neg(self, query_mz, query_intensity, library_mz, library_intensity, threshold=0.02):
-        # 以库为基准
+        # Based on the library
         new_query_intensity1 = np.zeros_like(library_intensity)
         for i, m in enumerate(library_mz):
             idx = np.argmin(np.abs(query_mz - m))
@@ -155,7 +153,7 @@ class MspFileLibraryMatcher:
         return new_query_intensity1
 
     def filter_intensity_pos(self, query_mz, query_intensity, library_mz, library_intensity, threshold=0.02):
-        # 两者取并集
+
         # Step 1: Compute the union of query_mz and library_mz
         combined_mz = np.union1d(query_mz, library_mz)
 
@@ -185,15 +183,17 @@ class MspFileLibraryMatcher:
         return spectrums
 
     def filter_spectrums(self, spectrums):
-
         new_spectrums = []
         Q1_list = []
         for i in spectrums:
-            # if i.metadata['adduct'] == '[M+H]+':
+
+            precursor_mz = i.metadata.get('precursor_mz', None)
+            if precursor_mz is not None:
+                Q1_list.append(precursor_mz)
+                new_spectrums.append(i)
+
+            # else:
             #     new_spectrums.append(i)
-            #     Q1_list.append(i.metadata['precursor_mz'])
-            new_spectrums.append(i)
-            Q1_list.append(i.metadata['precursor_mz'])
         return new_spectrums, Q1_list
 
     def find_indices_within_range(self, lst, target):

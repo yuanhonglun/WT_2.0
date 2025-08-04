@@ -40,13 +40,13 @@ def HrMs1Predictor(predict_msp_file, model_path=None):
     val_loader = get_data_loader("./tmp.pkl", batch_size, val=True)
     predictions = []
 
-    with torch.no_grad():  # 不计算梯度, 节省内存和加快速度
+    with torch.no_grad():
         for data, y in val_loader:
-            data = data.to(device)  # 将数据移动到设备
-            output = neural_network(data)  # 通过神经网络获取最终输出
-            predictions.append(output.cpu())  # 将输出移回CPU并存储
+            data = data.to(device)
+            output = neural_network(data)
+            predictions.append(output.cpu())
             # a = list(difference)
-            # break  # 只处理一个batch
+            # break
 
     # 合并结果
     predictions = torch.cat(predictions, dim=0)

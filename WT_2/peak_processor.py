@@ -9,15 +9,15 @@ warnings.filterwarnings("ignore")
 class PeakProcessor:
     def __init__(self, intensity_df, mz_df, rt_df, wid, sigma, min_noise, pepmass):
         """
-        初始化峰值处理类。
+        Initialize the peak processing class.
 
-        :param intensity_df: 强度数据 DataFrame
-        :param mz_df: mz 数据 DataFrame
-        :param rt_df: RT 数据 DataFrame
-        :param wid: 高斯滤波窗口大小
-        :param sigma: 高斯滤波的标准差
-        :param min_noise: 最小噪音
-        :param pepmass: 离子质量
+        :param intensity_df: DataFrame of intensity data
+        :param mz_df: DataFrame of mz data
+        :param rt_df: DataFrame of RT data
+        :param wid: Size of the Gaussian filter window
+        :param sigma: Standard deviation of the Gaussian filter
+        :param min_noise: Minimum noise level
+        :param pepmass: Ion mass
         """
         self.intensity_df = intensity_df
         self.mz_df = mz_df
@@ -29,7 +29,7 @@ class PeakProcessor:
 
     def find_peak(self):
         """
-        寻找峰值并进行处理。
+        Search for the peak and carry out the processing.
         """
         sg_list = []
         for n in range(0, self.wid * 2 + 1):
@@ -100,32 +100,32 @@ class PeakProcessor:
         return peak_df
 
     def _remove_duplicated_peaks(self, df):
-        # 先根据 accurate_mz 列的值从小到大排序
+        # First, sort by the values in the "accurate_mz" column in ascending order
         df.sort_values(by="accurate_mz", inplace=True)
-        # 初始化要删除的行索引列表
+        # Initialize the list of row indices to be deleted
         rows_to_drop = []
 
-        # 遍历 DataFrame
+        # Iterate over DataFrame
         for index, row in df.iterrows():
             # print("row.name = ", row.name)
             # print("rows_to_drop = ", rows_to_drop)
             if row.name in rows_to_drop:
                 continue
 
-            # 找到与本行 accurate_mz 值之差绝对值小于等于 0.02 的行
+            # Find the rows whose absolute difference from the current accurate_mz value is less than or equal to 0.02
             similar_rows = df[(abs(df["accurate_mz"] - row["accurate_mz"]) <= 0.02)]
 
-            # 如果只有一行，则继续下一轮循环
+            # If there is only one line, then proceed to the next round of the loop
             if len(similar_rows) == 1:
                 continue
             similar_rows = similar_rows.drop(index)
-            # 遍历相似的行，进行后续判断
+            # Traverse similar rows and carry out subsequent judgments
             for _, similar_row in similar_rows.iterrows():
                 # print("len = ", len(similar_rows))
                 # print("similar_row = ", similar_row)
-                # 判断 RT 之差的绝对值是否小于等于 2
+                # Determine whether the absolute value of the difference between RT is less than or equal to 2
                 if abs(row["apex_RT"] - similar_row["apex_RT"]) <= 2:
-                    # 判断 apex_raw_intensity 谁大
+                    # Determine which of apex_raw_intensity is larger
                     if row["apex_raw_intensity"] >= similar_row["apex_raw_intensity"]:
                         if similar_row.name not in rows_to_drop:
                             rows_to_drop.append(similar_row.name)
@@ -140,7 +140,7 @@ class PeakProcessor:
 
     def _new_calculate_noise(self, df):
         """
-        计算噪音值
+        Calculate the noise value
         """
         df = df.T
         df = df[df['intensity'] != 0]
@@ -149,7 +149,7 @@ class PeakProcessor:
 
     def _calculate_mz(self, df):
         """
-        计算精确的 mz 值
+        Calculate the precise mz value
         """
         return sum(df["mz"] * df["intensity"]) / sum(df["intensity"])
 
