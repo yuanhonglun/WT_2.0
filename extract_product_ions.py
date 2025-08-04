@@ -49,7 +49,7 @@ def insert_data_to_database(db_file, noise=200):
                         data_to_insert[key] = [0] * cycles
                     data_to_insert[key][cycle-1] = max(data_to_insert[key][cycle-1], intensity)
 
-    # 插入数据
+
     for (pepmass, mz_bin), intensities in data_to_insert.items():
         c.execute('''INSERT OR REPLACE INTO intensity_data (pepmass, mz_bin, {})
                      VALUES (?, ?, {})'''.format(", ".join(["cycle{}".format(i) for i in range(1, cycles+1)]), 
@@ -101,7 +101,7 @@ def insert_rt_data(db_file, rt_data):
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
 
-    # 插入数据
+
     for pepmass, rt_seconds_list in rt_data.items():
         c.execute('''INSERT OR REPLACE INTO rt_data (pepmass, {})
                      VALUES (?, {})'''.format(", ".join(["cycle{}".format(i) for i in range(1, cycles+1)]), 

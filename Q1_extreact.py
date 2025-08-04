@@ -13,7 +13,7 @@ def timer(func):
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()
-        print(f"函数 {func.__name__} 执行时间: {end_time - start_time} 秒")
+        print(f"{func.__name__} Execution time: {end_time - start_time} 秒")
         return result
 
     return wrapper
@@ -101,7 +101,7 @@ def plot_mz_picture(eic_df, file_name, path, gauss:bool):
 
 
 def secondorder_Gaussian_Filter(eic_df, wid, sigma):
-    # WTV2.0找峰
+    # WTV2.0 find peak
     sg_list = []
     for n in range(0, wid * 2 + 1):
         sg_list.append((1 - (pow(((-wid + n) / sigma), 2))) * (math.exp(-0.5 * pow(((-wid + n) / sigma), 2))))
@@ -116,7 +116,7 @@ def secondorder_Gaussian_Filter(eic_df, wid, sigma):
                                                         
     return eic_df
 
-    #scipy找峰
+    # scipy find peak
     # from scipy.ndimage import gaussian_filter
     # eic_df["gauss_intensity"] = gaussian_filter(eic_df["intensity"], sigma=1)
     # return eic_df
@@ -144,40 +144,40 @@ def find_peak_plot(peaks, properties, eic_df, file_name, path):
 def calculate_noise(df, min_noise):
     median_list = []
     for i in range(0, len(df), 13):
-        subset = df.iloc[i:i+13]  # 取13行子集
+        subset = df.iloc[i:i+13]  # Take a subset of 13 rows.
         
-        # 检查13行中是否有0值
+        # Check if there is a 0 value in row 13.
         if 0 in subset['intensity'].values:
             continue  # 若有0值则跳过这13行
         
-        # 若13行中没有0值，则计算平均值和大于平均值的行数
+        # If there are no 0 values in row 13, then calculate the average value and the number of rows that are greater than the average value.
         avg_intensity = subset['intensity'].mean()
         above_avg_count = subset[subset['intensity'] > avg_intensity]['intensity'].count()
         
-        # 若大于平均值的行数大于等于7，则计算中位数
+        # If the number of rows that are greater than the average value is equal to or greater than 7, then calculate the median.
         if above_avg_count >= 7:
             median_list.append(subset['intensity'].median())
     
-    # 如果没有得到任何中位数，则输出1000
+    # If no median is obtained, then output 1000.
     if not median_list:
         
         return min_noise
 
     return np.median(median_list)    
 
-ms1_path = r"C:\HNU\课题\WT 2.0\MRMHR找峰\Gmix_P75-174.ms1"
-db_path = r"C:\HNU\课题\WT 2.0\MRMHR找峰\test1.db"
+# ms1_path = r"Gmix_P75-174.ms1"
+# db_path = r"test1.db"
+#
+# RT_list = getMS1Rt(ms1_path)
+# # creatDBTalbe(RT_list, db_path, "Q1_table", ms1_path)
 
-RT_list = getMS1Rt(ms1_path)
-# creatDBTalbe(RT_list, db_path, "Q1_table", ms1_path)
-# print("db构建完成")
-
-picture_path = r"C:\HNU\课题\WT 2.0\MRMHR找峰\result"
-eic_df = query_ion_eic(db_path, "Q1_table", 75.02, RT_list)
-noise = calculate_noise(eic_df, 1000)
-print("noise = ", noise)
-plot_mz_picture(eic_df, "raw_mz7502", picture_path, False)
-eic_df = secondorder_Gaussian_Filter(eic_df, 5, 2.5)
-plot_mz_picture(eic_df, "gauss_mz7502", picture_path, True)
-peaks, properties = find_peak(eic_df, noise)
-find_peak_plot(peaks, properties, eic_df, "gauss_mz7502_peak", picture_path)
+#
+# picture_path = r"result"
+# eic_df = query_ion_eic(db_path, "Q1_table", 75.02, RT_list)
+# noise = calculate_noise(eic_df, 1000)
+# print("noise = ", noise)
+# plot_mz_picture(eic_df, "raw_mz7502", picture_path, False)
+# eic_df = secondorder_Gaussian_Filter(eic_df, 5, 2.5)
+# plot_mz_picture(eic_df, "gauss_mz7502", picture_path, True)
+# peaks, properties = find_peak(eic_df, noise)
+# find_peak_plot(peaks, properties, eic_df, "gauss_mz7502_peak", picture_path)
