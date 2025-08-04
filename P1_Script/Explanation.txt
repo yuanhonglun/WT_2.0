@@ -1,0 +1,4 @@
+1. The data exported from 10 samples using MSDIAL was processed as follows: individual samples were processed with "MSDIAL Offline Data Integration and De-duplication_0910", and batch samples were processed with "MSDIAL Batch Data Integration and De-duplication v01241010".
+2. When using MSDIAL for qualitative analysis, multiple MSP databases can be merged and de-duplicated by executing "Database Cleaning and Integration".
+3. After obtaining the processed table, individual samples were processed with "Based on Results Filtering MSP Signals_1128" to obtain the filtered MSP files, and batch samples were processed with "Based on Results Filtering MSP Signals_batch_0117".
+4. The obtained MSP was input into SIRIUS for qualitative analysis, and the results were merged with those from MSDIAL using "Qualitative Results Merge_0614".
