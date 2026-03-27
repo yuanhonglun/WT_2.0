@@ -1,6 +1,6 @@
 [project]
 name = "asfam-processor"
-version = "0.1.0"
+version = "0.2.260326"
 description = "ASFAM (All-ion Stepwise Fragmentation Acquisition Mode) data processor"
 requires-python = ">=3.9"
 dependencies = [

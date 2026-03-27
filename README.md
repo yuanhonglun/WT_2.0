@@ -24,18 +24,42 @@ The software provides a complete feature extraction pipeline from raw mzML files
 
 ## Installation
 
-### Requirements
+### Option 1: One-command install (recommended)
 
-- Python >= 3.9
-- Windows / Linux / macOS
+```bash
+pip install git+https://github.com/yuanhonglun/WT_2.0.git
+```
 
-### Install from source
+This installs the package and all dependencies in one step. After installation, run the GUI:
+
+```bash
+python -m asfam.gui.app
+```
+
+### Option 2: Install from cloned source
 
 ```bash
 git clone https://github.com/yuanhonglun/WT_2.0.git
-cd ASFAMProcessor
+cd WT_2.0
 pip install -e .
 ```
+
+### Option 3: Install dependencies only (without package install)
+
+```bash
+git clone https://github.com/yuanhonglun/WT_2.0.git
+cd WT_2.0
+pip install -r requirements.txt
+```
+
+### Option 4: Pre-built Windows executable (no Python needed)
+
+Download `ASFAMProcessor_v0.2.260326_win64.zip` from [Releases](https://github.com/yuanhonglun/WT_2.0/releases), unzip, and run `ASFAMProcessor.exe`.
+
+### Requirements
+
+- Python >= 3.9 (not needed for Option 4)
+- Windows / Linux / macOS (Option 4 is Windows only)
 
 ### Dependencies
 
