@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.request  # noqa: F401 — must be imported before pymzml for PyInstaller
 from pathlib import Path
 from typing import Optional, Callable
 

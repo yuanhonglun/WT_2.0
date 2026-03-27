@@ -3,6 +3,7 @@ import sys
 import os
 import logging
 import traceback
+import multiprocessing
 from datetime import datetime
 from pathlib import Path
 
@@ -89,7 +90,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("ASFAMProcessor")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("0.2.260326")
 
     # Set default font
     from PyQt5.QtGui import QFont
@@ -105,4 +106,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

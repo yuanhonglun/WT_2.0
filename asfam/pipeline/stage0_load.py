@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from pathlib import Path
-from multiprocessing import Pool
 from typing import Optional, Callable
 
 from asfam.config import ProcessingConfig
@@ -12,6 +12,10 @@ from asfam.models import RawSegmentData
 from asfam.io.mzml_reader import load_mzml
 
 logger = logging.getLogger(__name__)
+
+# In frozen (PyInstaller) mode, multiprocessing.Pool on Windows causes
+# issues (unpicklable exceptions, re-spawned GUI windows). Use sequential.
+_FROZEN = getattr(sys, 'frozen', False)
 
 
 def run_stage0(
@@ -38,7 +42,9 @@ def run_stage0(
 
     # Load all files
     loaded: dict[str, RawSegmentData] = {}  # filepath -> RawSegmentData
-    if config.n_workers > 1 and len(mzml_paths) > 1:
+    use_parallel = config.n_workers > 1 and len(mzml_paths) > 1 and not _FROZEN
+    if use_parallel:
+        from multiprocessing import Pool
         with Pool(processes=min(config.n_workers, len(mzml_paths))) as pool:
             for i, result in enumerate(pool.imap(_load_wrapper, mzml_paths)):
                 loaded[mzml_paths[i]] = result
