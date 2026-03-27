@@ -434,6 +434,9 @@ class MainWindow(QMainWindow):
                         adduct=c.adduct_type,
                         sn_ratio=c.ms1_sn or 0,
                         height_ion_mz=c.ms2_rep_ion_mz,
+                        mz_source=c.mz_source,
+                        mz_confidence=c.mz_confidence,
+                        detection_source=c.detection_source,
                         annotation_matches=c.annotation_matches,
                         selected_annotation_idx=c.selected_annotation_idx,
                     )
