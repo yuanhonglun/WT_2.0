@@ -1,0 +1,29 @@
+[project]
+name = "asfam-processor"
+version = "0.1.0"
+description = "ASFAM (All-ion Stepwise Fragmentation Acquisition Mode) data processor"
+requires-python = ">=3.9"
+dependencies = [
+    "pymzml>=2.5.0",
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "pandas>=1.3",
+    "matchms>=0.18",
+    "msbuddy>=0.2",
+    "matplotlib>=3.5",
+    "PyQt5>=5.15",
+    "lxml>=4.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+asfam = "asfam.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"

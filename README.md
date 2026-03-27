@@ -1,137 +1,208 @@
-# 1. Installation
-WT_2 requires Python 3.10. We recommend creating a virtual environment using conda:
+# ASFAMProcessor
+
+A dedicated data processing pipeline for All-ion Stepwise Fragmentation Acquisition Mode (ASFAM) LC-QTOF mass spectrometry data.
+
+## Overview
+
+ASFAMProcessor is designed to process data acquired using the ASFAM acquisition mode, which employs 1 Da HR-MRM stepping windows to capture high-resolution MS2 spectra with substantially reduced chimericity for virtually all precursor ions within the 75-1075 m/z range.
+
+The software provides a complete feature extraction pipeline from raw mzML files to annotated feature tables, spectral libraries, and processing reports.
+
+## Key Features
+
+- **MS1/MS2 dual-driven feature detection**: Combines MS2-driven extraction (EIC peak detection and RT clustering) with complementary MS1-driven detection for comprehensive metabolome coverage
+- **Two-pass MS1 assignment**: Strict and relaxed passes maximize the number of features with directly measured precursor m/z values
+- **Multiple m/z inference strategies**: Spectral library matching and neutral loss consensus analysis infer precursor m/z for features without MS1 signal
+- **Three-layer deduplication**:
+  - Isotope removal: graph-based algorithm with three confidence tiers (MS1 pattern support, modified cosine, dual cosine + neutral loss cosine)
+  - Adduct consolidation: neutral mass matching validated by EIC Pearson correlation
+  - In-source fragmentation (ISF) detection: dual criteria (precursor-fragment m/z relationship + EIC correlation)
+- **Spectral library annotation**: composite similarity scoring against MSP/MGF reference libraries
+- **Cross-replicate alignment**: Gaussian similarity-based matching with gap filling
+- **GUI and CLI**: interactive graphical interface and command-line interface
+- **Open standard formats**: reads mzML, exports CSV, MGF, MSP
+
+## Installation
+
+### Requirements
+
+- Python >= 3.9
+- Windows / Linux / macOS
+
+### Install from source
+
 ```bash
-conda create --name WT2 python=3.10
-conda activate WT2
-pip install WT_2
+git clone https://github.com/yuanhonglun/WT_2.0.git
+cd ASFAMProcessor
+pip install -e .
 ```
 
-# 2. Usage Guide
-## 2.1 Data Preparation
-- Each sample requires 10 raw MGF files and MS-DIAL processing results.
-- Place all MGF files and MS-DIAL results for the same sample into a folder named after the sample.
-- Multiple samples should be organized in separate folders.
-- Refer to the sample1 folder in test_data as an example.
+### Dependencies
 
+Automatically installed with pip:
 
-## 2.2 Peak Process
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pymzml | >= 2.5.0 | mzML file parsing |
+| numpy | >= 1.21 | Numerical computation |
+| scipy | >= 1.7 | Signal processing, peak detection |
+| pandas | >= 1.3 | Data tables |
+| matchms | >= 0.18 | Spectral library matching |
+| msbuddy | >= 0.2 | Molecular formula prediction |
+| matplotlib | >= 3.5 | Plotting |
+| PyQt5 | >= 5.15 | GUI framework |
+| lxml | >= 4.6 | XML parsing |
+
+## Quick Start
+
+### GUI
+
+```bash
+python -m asfam.gui.app
+```
+
+1. Click **Add Files** to load mzML files
+2. Select output directory
+3. Optionally load a spectral library (MSP/MGF)
+4. Adjust parameters if needed
+5. Click **Run Pipeline**
+6. Explore results in the feature table, EIC plot, and MS2 plot
+
+### CLI
+
+```bash
+# Basic usage
+asfam sample_100-129_rep1.mzML sample_130-159_rep1.mzML -o ./results
+
+# With spectral library and custom config
+asfam *.mzML -o ./output --library reference.msp --mode positive --workers 4 -v
+
+# Using a config file
+asfam *.mzML -o ./output --config my_config.json
+```
+
+### CLI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output` | Output directory (required) | - |
+| `--library` | Spectral library file (MSP/MGF) | None |
+| `--config` | Processing config JSON file | Default parameters |
+| `--mode` | Ionization mode (positive/negative) | positive |
+| `--workers` | Number of parallel workers | 4 |
+| `-v, --verbose` | Enable verbose logging | Off |
+
+## Input Data Format
+
+### mzML Files
+
+ASFAM data should be converted to mzML format (e.g., using MSConvert from ProteoWizard).
+
+**Filename convention**: The parser extracts segment information from filenames:
+- `SAMPLE_100-129_rep1.mzML` (sample_seglow-seghigh_rep)
+- `SAMPLE_100-129_1_30_1.mzML` (sample_seglow-seghigh_X_step_rep)
+
+Files with the same sample name and replicate ID are automatically grouped.
+
+### Spectral Libraries
+
+Supported formats:
+- **MSP** (NIST/MassBank format): NAME, FORMULA, PRECURSOR_MZ, PRECURSOR_TYPE, Num Peaks, peak list
+- **MGF** (Mascot Generic Format): BEGIN IONS / END IONS blocks with PEPMASS, peak list
+
+## Pipeline Stages
+
+```
+Stage 0: Load          → Parse mzML files, organize scan cycles
+Stage 1: MS2 Detection → Extract product ion EICs, detect peaks, cluster by RT
+Stage 1b: MS1 Detection → Detect MS1-only features (weak/no fragmentation)
+Stage 2: MS1 Assignment → Two-pass precise m/z assignment from MS1 spectra
+Stage 2.5: m/z Inference → Library matching + neutral loss consensus for MS2-only features
+Stage 3: Segment Merge  → Remove boundary duplicates across m/z segments
+Stage 4: Isotope Dedup  → Graph-based isotope cluster removal (3 confidence tiers)
+Stage 5: Adduct Dedup   → Neutral mass matching + EIC correlation validation
+Stage 6: ISF Detection  → Dual-criteria in-source fragmentation removal
+Stage 6.5: Annotation   → Spectral library matching (composite similarity)
+Stage 7: Alignment      → Cross-replicate Gaussian similarity matching + gap filling
+Stage 8: Export         → CSV feature table, MGF, MSP, processing report
+```
+
+## Output Files
+
+| File | Description |
+|------|-------------|
+| `features.csv` | Feature table with m/z, RT, quantification, annotations |
+| `ms2_spectra.mgf` | MS2 spectra in MGF format |
+| `ms2_spectra.msp` | MS2 spectra in MSP format |
+| `processing_report.txt` | Stage-by-stage statistics |
+
+### Feature Table Columns
+
+| Column | Description |
+|--------|-------------|
+| feature_id | Unique identifier (F00001, F00002, ...) |
+| precursor_mz | Precise precursor m/z |
+| rt_min | Retention time at apex (minutes) |
+| signal_type | "ms1_detected" or "ms2_only" |
+| n_fragments | Number of MS2 product ions |
+| mean_height | Mean peak height across replicates |
+| mean_area | Mean peak area across replicates |
+| cv | Coefficient of variation |
+| name | Annotation name (if matched) |
+| formula | Molecular formula (if available) |
+| height_repN / area_repN | Per-replicate quantification |
+
+## Configuration
+
+All parameters can be saved/loaded as JSON:
+
 ```python
-from WT_2 import MultiprocessingManager
+from asfam.config import ProcessingConfig
 
-sample_folder = "./test_data/sample1" 
-out_dir = "./test_data/sample1" 
+# Load custom config
+config = ProcessingConfig.load("my_config.json")
 
-manager = MultiprocessingManager(
-    outer_max_workers=1,
-    inner_max_workers=8,
-    mgf_folder=sample_folder,
-    out_dir=out_dir,
-)
-manager.process_mgf_files()
+# Modify parameters
+config.peak_height_threshold = 500.0
+config.isotope_modified_cos_threshold = 0.9
 
-```
-- Parameters:
-  - process_mgf_files() will automatically create a result folder in out_dir to store peak extraction and clustering results.
-  - sample_folder: Sample directory path.
-  - out_dir: Output directory path.
-  - outer_max_workers: Number of outer processes for MGF file processing (default: 1).
-  - inner_max_workers: Number of inner processes for m/z processing (default: 8).
-  - RT_start: Left boundary of retention time (RT) range (seconds).
-  - RT_end: Right boundary of RT range (seconds).
-  - fp_wid: Peak detection window width (default: 6).
-  - fp_sigma: Peak detection sigma (default: 2).
-  - fp_min_noise: Noise threshold for peak detection (default: 200).
-  - group_wid: Peak clustering window width (default: 6).
-  - group_sigma:  Peak clustering sigma (default: 0.5).
-  
-
-## 2.3 Peak Deduplication
-```python
-from WT_2 import Deduplicator
-
-
-sample_name = os.path.basename(sample_folder)
-msdial_path = "./test_data/sample1/sample1_Q1_peak_df.csv"
-
-
-deduplicator = Deduplicator(
-    peak_result_dir=os.path.join(out_dir, "result"),
-    msdial_out_path=msdial_path,
-    sample_name=sample_name,
-    useHrMs1=True,
-    HrMs1model_path=None
-)
-deduplicator.remove_msdial_duplicate()
-peak_outpath, group_outpath = deduplicator.filter_p3_group()
+# Save
+config.save("updated_config.json")
 ```
 
-- Parameters:
-    - peak_result_dir: Directory containing peak extraction results (default: result folder in out_dir).
-    - msdial_out_path: Path to MS-DIAL input file.
-    - sample_name: Sample name (default: folder name).
-    - useHrMs1: Whether to use high-resolution MS1 model (True for high-res, False for low-res, default: False).
-    - HrMs1model_path: Path to high-resolution MS1 prediction model. If None, the pretrained model will be downloaded automatically. Pretrained model available at test_data/models/HrMs1.pth or [Hugging Face](https://huggingface.co/liuzhenhuan123/HrMs1/tree/main)
+See the [User Guide](USER_GUIDE.md) for a complete parameter reference.
 
-## 2.4 Metabolite Identification
-```python
-from WT_2 import MspGenerator, MspFileLibraryMatcher
-import pandas as pd
+## Project Files
 
-# Generate MSP file from deduplicated P3 group results
-df = pd.read_csv(group_outpath)
-out_msp_path = os.path.join(os.path.dirname(group_outpath), sample_name + ".msp")
-msp_generator = MspGenerator(df, out_msp_path, useHrMs1=False)
+The GUI supports saving and loading project files (`.asfam` format) that preserve:
+- Processing configuration
+- All detected features and candidates
+- File paths and sample groupings
+- Stage statistics
+- Annotation results
 
+## System Requirements
 
-# Library matching (requires MSP-format library)
-out_match_path = os.path.join(os.path.dirname(group_outpath), sample_name + "_match_library_out.csv")
+- **RAM**: 4 GB minimum, 8+ GB recommended (depends on data size)
+- **CPU**: Multi-core recommended (parallel processing across files)
+- **Disk**: ~50 MB per mzML file for intermediate results
 
-library_matcher = MspFileLibraryMatcher(
-    query_msp_path=out_msp_path,
-    library_msp_path="./test_data/library_msp",
-    out_path=out_match_path,
-    num=1
-)
-library_matcher.calculateCosineBoth()
+## Citation
 
-```
+If you use ASFAMProcessor in your research, please cite:
 
-- MspGenerator Parameters:
-  - df: Deduplicated P3 group dataframe.
-  - out_msp_path: Output path for MSP file.
-  - useHrMs1: Whether to use high-resolution MS1 data (True for high-res, False for low-res, default: False). If set to true, ensure that the high-resolution MS1 model is used during the Peak Deduplication step.
+> Yuan H, Huang S, Liu Z, et al. WT 2.0: Unveiling the "dark matter" in the metabolome using all-ion stepwise fragmentation acquisition mode (ASFAM) and dedicated feature extraction pipeline. *Nature Communications* (under review).
 
-- MspFileLibraryMatcher Parameters:
-    - query_msp_path: MSP file generated from P3 group results (standard MSP format).
-    - library_msp_path: Path to reference MSP library.
-    - out_path: Output path for matching results.
-    - num: Number of top matches to keep (default: 1).
+## License
 
+BSD 3-Clause License with Non-Commercial Clause.
 
-## 2.5 Metabolite quantification
-```python
-from WT_2 import SampleQuantity
+- Free for academic and non-commercial use
+- Commercial use requires written permission: yuanhonglun@hotmail.com
 
+Copyright (c) 2025-2026, Honglun Yuan, Hainan University.
 
-quantity_folder = "./test_data/quantity_prepared"
+## Contact
 
-
-quantifier = SampleQuantity(
-    quantity_folder=quantity_folder,
-    quantity_out_path=quantity_folder,
-    ref_file=None,
-    useHrMs1=True,
-    uesSampleAligmentmodel=True,
-    SampleAligmentmodel_path=None
-)
-quantifier.quantity_processor()
-
-```
-
-- Parameters:
-    - quantity_folder: Directory containing deduplicated P3 results for all samples.
-    - quantity_out_path: Output directory.
-    - ref_file: Reference sample file (uses first sample as reference if None).
-    - useHrMs1:  Whether to use high-resolution MS1 data (requires prior high-res processing).
-    - uesSampleAligmentmodel: Enable sample alignment model.
-    - SampleAligmentmodel_path: Path to sample alignment model. If None, downloads pretrained model. Pretrained model available at test_data/models/samplealigment.pth or [Hugging Face](https://huggingface.co/liuzhenhuan123/Samplealigment/tree/main)
+- Bug reports: [GitHub Issues](https://github.com/yuanhonglun/WT_2.0/issues)
+- Email: yuanhonglun@hotmail.com
