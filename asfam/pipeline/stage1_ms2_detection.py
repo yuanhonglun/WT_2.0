@@ -8,7 +8,7 @@ import numpy as np
 
 from asfam.config import ProcessingConfig
 from asfam.models import RawSegmentData, CandidateFeature
-from asfam.core.eic import extract_product_ion_eics
+from asfam.core.eic import extract_product_ion_eics, merge_close_ions
 from asfam.core.peak_detection import detect_peaks
 from asfam.core.clustering import cluster_peaks_by_rt
 
@@ -121,6 +121,14 @@ def _process_one_file(
             ms2_mz = np.array([p.product_mz for p in cluster], dtype=np.float64)
             ms2_intensity = np.array([p.height for p in cluster], dtype=np.float64)
             ms2_sn = np.array([p.sn_ratio for p in cluster], dtype=np.float64)
+
+            # Merge near-duplicate product ions (adaptive tolerance for high mz)
+            ms2_mz, ms2_intensity, ms2_sn = merge_close_ions(
+                ms2_mz, ms2_intensity,
+                precursor_mz_nominal=precursor,
+                base_tolerance=config.eic_mz_tolerance,
+                extra_arrays=[ms2_sn],
+            )
 
             # Remove flat-top noise ions: ions with identical intensity are instrument baseline
             ms2_mz, ms2_intensity, ms2_sn = _remove_flat_noise(ms2_mz, ms2_intensity, extra_arrays=[ms2_sn])

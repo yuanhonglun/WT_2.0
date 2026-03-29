@@ -15,7 +15,7 @@ import numpy as np
 
 from asfam.config import ProcessingConfig
 from asfam.models import RawSegmentData, CandidateFeature
-from asfam.core.eic import extract_ms1_eic, extract_ms1_precise_mz
+from asfam.core.eic import extract_ms1_eic, extract_ms1_precise_mz, merge_close_ions
 from asfam.core.peak_detection import detect_peaks
 
 logger = logging.getLogger(__name__)
@@ -187,8 +187,9 @@ def _collect_ms2_at_peak(
     n_pts = eic_right - eic_left + 1
 
     # First pass: discover all unique product ions in the peak range
-    # Adaptive bin size: wider at higher m/z
-    bin_scale = max(100, int(1.0 / max(config.eic_mz_tolerance, channel * 100e-6)))
+    # Adaptive bin size: wider at higher m/z (matches adaptive tolerance)
+    adaptive_tol = max(config.eic_mz_tolerance, channel * 100e-6)
+    bin_scale = max(1, int(1.0 / adaptive_tol))
     ion_bins: dict[int, float] = {}  # bin -> representative mz
     for ci in range(left_idx, right_idx + 1):
         if ci >= n_cycles:
@@ -257,4 +258,13 @@ def _collect_ms2_at_peak(
 
     # Sort by m/z
     order = np.argsort(result_mz)
-    return np.array(result_mz, dtype=np.float64)[order], np.array(result_int, dtype=np.float64)[order]
+    out_mz = np.array(result_mz, dtype=np.float64)[order]
+    out_int = np.array(result_int, dtype=np.float64)[order]
+
+    # Merge near-duplicate ions (adaptive tolerance handles high-mz spread)
+    out_mz, out_int = merge_close_ions(
+        out_mz, out_int,
+        precursor_mz_nominal=channel,
+        base_tolerance=config.eic_mz_tolerance,
+    )
+    return out_mz, out_int
