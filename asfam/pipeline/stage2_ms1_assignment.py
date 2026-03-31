@@ -112,6 +112,8 @@ def _detect_ms1_peaks(
         sn_threshold=config.peak_sn_threshold,
         width_min=config.peak_width_min,
         prominence=config.ms1_min_height * 0.5,
+        compute_gaussian=True,
+        gaussian_threshold=config.peak_gaussian_threshold,
     )
 
 
@@ -209,6 +211,8 @@ def _detect_ms1_peaks_relaxed(
         sn_threshold=2.0,
         width_min=3,
         prominence=30.0,
+        compute_gaussian=True,
+        gaussian_threshold=0.3,
     )
 
 

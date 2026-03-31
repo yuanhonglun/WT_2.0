@@ -81,6 +81,7 @@ a = Analysis(
         'asfam.pipeline.stage3_merge_segments',
         'asfam.pipeline.stage4_isotope_dedup',
         'asfam.pipeline.stage5_adduct_dedup',
+        'asfam.pipeline.stage5b_duplicate_detection',
         'asfam.pipeline.stage6_isf_detection',
         'asfam.pipeline.stage6b_annotation',
         'asfam.pipeline.stage7_alignment',

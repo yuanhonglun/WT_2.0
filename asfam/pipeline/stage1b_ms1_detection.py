@@ -267,4 +267,12 @@ def _collect_ms2_at_peak(
         precursor_mz_nominal=channel,
         base_tolerance=config.eic_mz_tolerance,
     )
+
+    # Per-ion relative threshold: remove ions below X% of base peak
+    if config.msms_relative_threshold > 0 and len(out_int) > 0:
+        base_peak = float(np.max(out_int))
+        keep = out_int >= base_peak * config.msms_relative_threshold
+        out_mz = out_mz[keep]
+        out_int = out_int[keep]
+
     return out_mz, out_int

@@ -124,6 +124,9 @@ def run_stage7(
             detection_source=ref_feat.detection_source,
             mz_source=ref_feat.mz_source,
             mz_confidence=ref_feat.mz_confidence,
+            is_duplicate=ref_feat.is_duplicate,
+            duplicate_group_id=ref_feat.duplicate_group_id,
+            duplicate_type=ref_feat.duplicate_type,
         )
         # Propagate annotation matches (top N)
         if ref_feat.annotation_matches:

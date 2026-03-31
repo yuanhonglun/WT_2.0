@@ -228,7 +228,15 @@ class EICPlotWidget(QWidget):
         self._show_smooth = checked
         self._btn_smooth.setText("Smoothed" if checked else "Raw")
         if self._current_feature:
+            # Save current zoom state before redraw
+            saved = [(ax.get_xlim(), ax.get_ylim()) for ax in self._axes] if self._axes else None
             self._redraw()
+            # Restore zoom state after redraw
+            if saved and len(saved) == len(self._axes):
+                for i, ax in enumerate(self._axes):
+                    ax.set_xlim(saved[i][0])
+                    ax.set_ylim(saved[i][1])
+                self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Scroll zoom

@@ -47,7 +47,7 @@ class ProcessingConfig:
     merge_ms2_cosine_threshold: float = 0.8
 
     # -- Stage 4: Isotope deduplication --
-    isotope_rt_tolerance: float = 0.01          # min
+    isotope_rt_tolerance: float = 0.1           # min (search window; overlap ratio is primary criterion)
     isotope_overlap_ratio: float = 0.80
     isotope_mz_tolerance: float = 0.01          # Da, classic gaps
     isotope_integer_step_tolerance: float = 0.02  # Da, relaxed gaps
@@ -66,6 +66,12 @@ class ProcessingConfig:
     adduct_mw_tolerance: float = 0.02  # Da
     adduct_eic_pearson_threshold: float = 0.9
 
+    # -- Stage 5b: Duplicate detection --
+    duplicate_rt_tolerance: float = 0.2    # min
+    duplicate_mz_tolerance: float = 0.5    # Da
+    duplicate_cosine_threshold: float = 0.85
+    duplicate_min_matched: int = 3
+
     # -- Stage 6: ISF detection --
     isf_eic_pearson_threshold: float = 0.9
     isf_min_correlated_scans: int = 10
@@ -83,6 +89,7 @@ class ProcessingConfig:
     export_mgf: bool = True
     export_msp: bool = True
     export_report: bool = True
+    export_include_duplicates: bool = False
 
     # -- Quality filtering --
     final_height_threshold: float = 1000.0

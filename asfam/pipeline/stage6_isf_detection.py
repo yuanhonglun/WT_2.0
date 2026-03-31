@@ -92,13 +92,19 @@ def run_stage6(
                 if r >= config.isf_eic_pearson_threshold and \
                    n_pts >= config.isf_min_correlated_scans:
                     child.status = "isf_removed"
+                    child.is_duplicate = True
+                    child.duplicate_type = "isf"
                     child.isf_parent_id = parent.feature_id
+                    # Link parent and child via duplicate_group_id
+                    isf_gid = 200000 + n_isf
+                    child.duplicate_group_id = isf_gid
+                    if parent.duplicate_group_id is None:
+                        parent.duplicate_group_id = isf_gid
+                        parent.duplicate_type = parent.duplicate_type or "isf"
                     n_removed += 1
                     break  # child is ISF, stop looking for parents
 
-        features_by_replicate[rep_id] = [
-            f for f in features if f.status == "active"
-        ]
+        # Keep all features (removed ones are marked is_duplicate=True)
 
         logger.info(
             "  Replicate %s: %d -> %d (%d ISF removed)",

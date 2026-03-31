@@ -128,6 +128,10 @@ class CandidateFeature:
     adduct_type: Optional[str] = None
     isf_parent_id: Optional[str] = None
     detection_source: str = "ms2_driven"
+    # Duplicate detection (Stage 5b)
+    is_duplicate: bool = False
+    duplicate_group_id: Optional[int] = None
+    duplicate_type: str = ""  # "isotope", "adduct", "isf", "spectral"
     # Library annotation (top N matches)
     annotation_matches: list = field(default_factory=list)  # list[AnnotationMatch]
     selected_annotation_idx: int = 0
@@ -177,6 +181,10 @@ class Feature:
     mz_source: str = ""       # "ms1_peak", "ms1_relaxed", "library", "nl_consensus", ""
     mz_confidence: str = ""   # for nl_consensus: "high", "medium", "low"
     detection_source: str = "ms2_driven"
+    # Duplicate detection (Stage 5b)
+    is_duplicate: bool = False
+    duplicate_group_id: Optional[int] = None
+    duplicate_type: str = ""  # "isotope", "adduct", "isf", "spectral"
     # Library annotation (top N matches)
     annotation_matches: list = field(default_factory=list)  # list[AnnotationMatch]
     selected_annotation_idx: int = 0

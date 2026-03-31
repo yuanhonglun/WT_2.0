@@ -140,6 +140,16 @@ def _process_one_file(
             if float(np.max(ms2_intensity)) < config.msms_intensity_threshold:
                 continue
 
+            # Per-ion relative threshold: remove ions below X% of base peak
+            if config.msms_relative_threshold > 0 and len(ms2_intensity) > 0:
+                base_peak = float(np.max(ms2_intensity))
+                keep = ms2_intensity >= base_peak * config.msms_relative_threshold
+                ms2_mz = ms2_mz[keep]
+                ms2_intensity = ms2_intensity[keep]
+                ms2_sn = ms2_sn[keep]
+                if len(ms2_mz) < config.min_fragments_per_feature:
+                    continue
+
             # Sort by m/z
             order = np.argsort(ms2_mz)
             ms2_mz = ms2_mz[order]

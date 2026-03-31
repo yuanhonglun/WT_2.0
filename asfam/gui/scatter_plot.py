@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
 from PyQt5.QtCore import pyqtSignal
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
@@ -18,6 +18,7 @@ THEME_BLUE = "#2D6A9F"
 
 class ScatterPlotWidget(QWidget):
     pointClicked = pyqtSignal(str)
+    filterChanged = pyqtSignal()  # emitted when any checkbox toggles
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,16 +37,30 @@ class ScatterPlotWidget(QWidget):
         lbl = QLabel("Show:")
         lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
         toolbar_row.addWidget(lbl)
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "MS1 only", "MS2 only"])
-        self.filter_combo.setFixedWidth(100)
-        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
-        toolbar_row.addWidget(self.filter_combo)
+        self._chk_ms1 = QCheckBox("MS1-detected")
+        self._chk_ms1.setChecked(True)
+        self._chk_ms1.setStyleSheet("font-size: 10px;")
+        self._chk_ms1.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_ms1)
+        self._chk_ms2 = QCheckBox("MS2-only")
+        self._chk_ms2.setChecked(True)
+        self._chk_ms2.setStyleSheet("font-size: 10px;")
+        self._chk_ms2.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_ms2)
+        self._chk_annotated = QCheckBox("Annotated")
+        self._chk_annotated.setChecked(False)
+        self._chk_annotated.setStyleSheet("font-size: 10px;")
+        self._chk_annotated.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_annotated)
+        self._chk_duplicates = QCheckBox("Duplicates")
+        self._chk_duplicates.setChecked(False)
+        self._chk_duplicates.setStyleSheet("font-size: 10px;")
+        self._chk_duplicates.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_duplicates)
         layout.addLayout(toolbar_row)
         layout.addWidget(self.canvas)
 
         self.setMinimumHeight(200)
-        self._filter_mode = "all"  # "all", "high", "low"
 
         self._features: list[Feature] = []
         self._highlight_lines = None
@@ -70,32 +85,82 @@ class ScatterPlotWidget(QWidget):
         self._features = features
         self._draw()
 
-    def _on_filter_changed(self, index):
-        modes = ["all", "high", "low"]
-        self._filter_mode = modes[index] if index < len(modes) else "all"
+    def _on_filter_changed(self, _checked=None):
         self._draw()
+        self.filterChanged.emit()
+
+    @property
+    def show_duplicates(self) -> bool:
+        return self._chk_duplicates.isChecked()
+
+    # Duplicate type -> line color
+    _DUP_COLORS = {"isotope": "#2196F3", "adduct": "#4CAF50", "isf": "#FF9800", "spectral": "#9C27B0"}
 
     def highlight_feature(self, feature_id: str):
         if self._highlight_lines is not None:
-            for line in self._highlight_lines:
+            for artist in self._highlight_lines:
                 try:
-                    line.remove()
+                    artist.remove()
                 except Exception:
                     pass
             self._highlight_lines = None
 
+        ax = self.fig.axes[0] if self.fig.axes else None
+        if ax is None:
+            return
+
+        target = None
         for f in self._features:
             if f.feature_id == feature_id:
-                ax = self.fig.axes[0] if self.fig.axes else None
-                if ax is None:
-                    return
-                self._highlight_lines = ax.plot(
-                    f.rt, f.precursor_mz, "o",
-                    markersize=16, markerfacecolor="none",
-                    markeredgecolor="red", markeredgewidth=2.5, zorder=10,
-                )
-                self.canvas.draw_idle()
-                return
+                target = f
+                break
+        if target is None:
+            return
+
+        artists = []
+
+        # Highlight the selected feature (red circle)
+        artists.extend(ax.plot(
+            target.rt, target.precursor_mz, "o",
+            markersize=16, markerfacecolor="none",
+            markeredgecolor="red", markeredgewidth=2.5, zorder=10,
+        ))
+
+        # If feature belongs to a dedup group, draw connection lines
+        gid = target.duplicate_group_id
+        if gid is not None:
+            group = [f for f in self._features if f.duplicate_group_id == gid]
+            if len(group) > 1:
+                # Find the representative (the one with is_duplicate=False)
+                rep = next((f for f in group if not f.is_duplicate), group[0])
+                color = self._DUP_COLORS.get(target.duplicate_type or rep.duplicate_type, "gray")
+
+                # Mark representative with filled star
+                artists.extend(ax.plot(
+                    rep.rt, rep.precursor_mz, "*",
+                    markersize=18, markerfacecolor=color,
+                    markeredgecolor="black", markeredgewidth=0.5, zorder=11,
+                ))
+
+                # Draw lines from representative to each duplicate
+                for member in group:
+                    if member.feature_id == rep.feature_id:
+                        continue
+                    artists.extend(ax.plot(
+                        [rep.rt, member.rt],
+                        [rep.precursor_mz, member.precursor_mz],
+                        color=color, linewidth=2, alpha=0.7,
+                        linestyle="--", zorder=9,
+                    ))
+                    # Mark duplicate with hollow circle
+                    artists.extend(ax.plot(
+                        member.rt, member.precursor_mz, "o",
+                        markersize=12, markerfacecolor="none",
+                        markeredgecolor=color, markeredgewidth=2, zorder=10,
+                    ))
+
+        self._highlight_lines = artists
+        self.canvas.draw_idle()
 
     def _draw(self):
         # Fully clear figure and recreate axes (prevents colorbar width accumulation)
@@ -111,18 +176,19 @@ class ScatterPlotWidget(QWidget):
             self.canvas.draw()
             return
 
-        # Apply filter mode
-        all_high = [f for f in self._features if f.signal_type == "ms1_detected"]
-        all_low = [f for f in self._features if f.signal_type == "ms2_only"]
-        if self._filter_mode == "high":
-            high = all_high
-            low = []
-        elif self._filter_mode == "low":
-            high = []
-            low = all_low
-        else:
-            high = all_high
-            low = all_low
+        # Apply checkbox filters
+        show_ms1 = self._chk_ms1.isChecked()
+        show_ms2 = self._chk_ms2.isChecked()
+        annotated_only = self._chk_annotated.isChecked()
+        show_duplicates = self._chk_duplicates.isChecked()
+        high = [f for f in self._features if f.signal_type == "ms1_detected"] if show_ms1 else []
+        low = [f for f in self._features if f.signal_type == "ms2_only"] if show_ms2 else []
+        if annotated_only:
+            high = [f for f in high if f.name]
+            low = [f for f in low if f.name]
+        if not show_duplicates:
+            high = [f for f in high if not f.is_duplicate]
+            low = [f for f in low if not f.is_duplicate]
 
         visible = high + low
         if not visible:
@@ -287,13 +353,31 @@ class ScatterPlotWidget(QWidget):
         ax = self._get_ax()
         if not self._features or x is None or y is None or ax is None:
             return
+        # Only search visible features
+        show_ms1 = self._chk_ms1.isChecked()
+        show_ms2 = self._chk_ms2.isChecked()
+        annotated_only = self._chk_annotated.isChecked()
+        show_duplicates = self._chk_duplicates.isChecked()
+        visible = []
+        for f in self._features:
+            if f.signal_type == "ms1_detected" and not show_ms1:
+                continue
+            if f.signal_type == "ms2_only" and not show_ms2:
+                continue
+            if annotated_only and not f.name:
+                continue
+            if not show_duplicates and f.is_duplicate:
+                continue
+            visible.append(f)
+        if not visible:
+            return
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
         x_range = max(xlim[1] - xlim[0], 1e-6)
         y_range = max(ylim[1] - ylim[0], 1e-6)
         best = None
         best_dist = float("inf")
-        for f in self._features:
+        for f in visible:
             d = ((f.rt - x) / x_range) ** 2 + ((f.precursor_mz - y) / y_range) ** 2
             if d < best_dist:
                 best_dist = d

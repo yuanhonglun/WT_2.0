@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QComboBox, QLabel,
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QThread, pyqtSignal as QtSignal
 from PyQt5.QtGui import QIcon, QColor, QPalette
 
 from asfam.config import ProcessingConfig
@@ -124,12 +125,32 @@ STYLESHEET = f"""
 """
 
 
+class _UpdateChecker(QThread):
+    """Background thread to check for new releases on GitHub."""
+    update_available = QtSignal(str, str)  # (version, download_url)
+
+    def run(self):
+        try:
+            import urllib.request, json
+            url = "https://api.github.com/repos/yuanhonglun/WT_2.0/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "ASFAMProcessor"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("v")
+            html_url = data.get("html_url", "")
+            from asfam import __version__
+            if tag and tag > __version__:
+                self.update_available.emit(tag, html_url)
+        except Exception:
+            pass
+
+
 class MainWindow(QMainWindow):
     """ASFAMProcessor main window."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ASFAMProcessor v0.2.260326")
+        self.setWindowTitle("ASFAMProcessor v0.3.260330a")
         self.resize(1400, 900)
 
         # Set icon
@@ -155,6 +176,18 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         self.statusBar().showMessage("Ready")
+
+        # Background version check
+        self._update_checker = _UpdateChecker()
+        self._update_checker.update_available.connect(self._show_update_dialog)
+        self._update_checker.start()
+
+    def _show_update_dialog(self, version: str, url: str):
+        QMessageBox.information(
+            self, "Update Available",
+            f"A new version (v{version}) of ASFAMProcessor is available.\n\n"
+            f"Download: {url}",
+        )
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main")
@@ -262,7 +295,12 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.feature_table.featureSelected.connect(self._on_feature_selected)
         self.scatter_plot.pointClicked.connect(self._on_scatter_clicked)
+        self.scatter_plot.filterChanged.connect(self._on_scatter_filter_changed)
         self.ms2_plot.annotationSelected.connect(self._on_annotation_selected)
+
+    def _on_scatter_filter_changed(self):
+        """Sync feature table duplicate filter with scatter plot checkbox."""
+        self.feature_table.proxy.set_show_duplicates(self.scatter_plot.show_duplicates)
 
     # ------------------------------------------------------------------
     # Pipeline execution
@@ -437,6 +475,9 @@ class MainWindow(QMainWindow):
                         mz_source=c.mz_source,
                         mz_confidence=c.mz_confidence,
                         detection_source=c.detection_source,
+                        is_duplicate=c.is_duplicate,
+                        duplicate_group_id=c.duplicate_group_id,
+                        duplicate_type=c.duplicate_type,
                         annotation_matches=c.annotation_matches,
                         selected_annotation_idx=c.selected_annotation_idx,
                     )
@@ -466,9 +507,19 @@ class MainWindow(QMainWindow):
         sig = "MS1" if feat.signal_type == "ms1_detected" else "MS2"
         name_str = f" [{feat.name}]" if feat.name else ""
         formula_str = f" {feat.formula}" if feat.formula else ""
+
+        # Duplicate group info
+        dup_str = ""
+        if feat.duplicate_group_id is not None:
+            group = [f for f in self.features if f.duplicate_group_id == feat.duplicate_group_id]
+            if len(group) > 1:
+                rep = next((f for f in group if not f.is_duplicate), group[0])
+                members = ", ".join(f.feature_id for f in group if f.feature_id != rep.feature_id)
+                dup_str = f" | {feat.duplicate_type} group: rep={rep.feature_id}, dups=[{members}]"
+
         self.statusBar().showMessage(
             f"{feat.feature_id}: m/z {feat.precursor_mz:.4f}, "
-            f"RT {feat.rt:.2f}, {sig}{name_str}{formula_str}"
+            f"RT {feat.rt:.2f}, {sig}{name_str}{formula_str}{dup_str}"
         )
 
     def _on_scatter_clicked(self, feature_id: str):

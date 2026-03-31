@@ -27,26 +27,33 @@ def run_stage8(
     """
     logger.info("Stage 8: Exporting results...")
     output_dir = Path(output_dir)
+
+    # Filter duplicates unless configured to include them
+    if not config.export_include_duplicates:
+        export_features = [f for f in features if not f.is_duplicate]
+        logger.info("  Excluding %d duplicates from export", len(features) - len(export_features))
+    else:
+        export_features = features
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
 
     # 1. CSV feature table
     csv_path = output_dir / "features.csv"
-    _export_csv(features, csv_path, config)
+    _export_csv(export_features, csv_path, config)
     outputs["csv"] = str(csv_path)
-    logger.info("  Feature table: %s (%d features)", csv_path.name, len(features))
+    logger.info("  Feature table: %s (%d features)", csv_path.name, len(export_features))
 
     # 2. MGF export
     if config.export_mgf:
         mgf_path = output_dir / "ms2_spectra.mgf"
-        _export_mgf(features, mgf_path)
+        _export_mgf(export_features, mgf_path)
         outputs["mgf"] = str(mgf_path)
         logger.info("  MGF: %s", mgf_path.name)
 
     # 3. MSP export
     if config.export_msp:
         msp_path = output_dir / "ms2_spectra.msp"
-        _export_msp(features, msp_path)
+        _export_msp(export_features, msp_path)
         outputs["msp"] = str(msp_path)
         logger.info("  MSP: %s", msp_path.name)
 

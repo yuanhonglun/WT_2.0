@@ -133,6 +133,9 @@ def _features_to_dicts(features: list[Feature]) -> list[dict]:
             "mz_source": f.mz_source,
             "mz_confidence": f.mz_confidence,
             "detection_source": f.detection_source,
+            "is_duplicate": f.is_duplicate,
+            "duplicate_group_id": f.duplicate_group_id,
+            "duplicate_type": f.duplicate_type,
             # Annotation matches (top N)
             "annotation_matches": [
                 {"rank": m.rank, "name": m.name, "formula": m.formula,
@@ -177,6 +180,9 @@ def _dicts_to_features(dicts: list[dict]) -> list[Feature]:
             mz_source=d.get("mz_source", ""),
             mz_confidence=d.get("mz_confidence", ""),
             detection_source=d.get("detection_source", "ms2_driven"),
+            is_duplicate=d.get("is_duplicate", False),
+            duplicate_group_id=d.get("duplicate_group_id"),
+            duplicate_type=d.get("duplicate_type", ""),
         )
         # Backward compatibility: map old signal_type values
         _st = f.signal_type
@@ -240,6 +246,9 @@ def _candidates_to_dicts(candidates: list[CandidateFeature]) -> list[dict]:
             "detection_source": c.detection_source,
             "mz_source": c.mz_source,
             "mz_confidence": c.mz_confidence,
+            "is_duplicate": c.is_duplicate,
+            "duplicate_group_id": c.duplicate_group_id,
+            "duplicate_type": c.duplicate_type,
             # Annotation matches (top N)
             "annotation_matches": [
                 {"rank": m.rank, "name": m.name, "formula": m.formula,
@@ -290,6 +299,9 @@ def _dicts_to_candidates(dicts: list[dict]) -> list[CandidateFeature]:
             detection_source=d.get("detection_source", "ms2_driven"),
             mz_source=d.get("mz_source", ""),
             mz_confidence=d.get("mz_confidence", ""),
+            is_duplicate=d.get("is_duplicate", False),
+            duplicate_group_id=d.get("duplicate_group_id"),
+            duplicate_type=d.get("duplicate_type", ""),
         )
         # Backward compatibility: map old signal_type values
         if c.signal_type == "high_response":

@@ -21,8 +21,8 @@ COLUMNS = [
     ("m/z", "precursor_mz"),
     ("RT (min)", "rt"),
     ("Type", "signal_type"),
-    ("m/z Source", "mz_source"),
-    ("Source", "detection_source"),
+    ("MS1 m/z Source", "mz_source"),
+    ("Detection Mode", "detection_source"),
     ("Height", "mean_height"),
     ("Fragments", "n_fragments"),
     ("CV", "cv"),
@@ -65,6 +65,9 @@ class FeatureTableModel(QAbstractTableModel):
             val = getattr(feat, col_attr, None)
             if val is None:
                 return ""
+            # Show duplicate type in Type column for duplicate features
+            if col_attr == "signal_type" and feat.is_duplicate and feat.duplicate_type:
+                return feat.duplicate_type
             # Special display for mz_source: append confidence for nl_consensus
             if col_attr == "mz_source" and val == "nl_consensus":
                 conf = getattr(feat, "mz_confidence", "")
@@ -124,12 +127,24 @@ class FeatureSortProxy(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._filter_text = ""
+        self._show_duplicates = False
 
     def set_filter_text(self, text: str):
         self._filter_text = text.lower()
         self.invalidateFilter()
 
+    def set_show_duplicates(self, show: bool):
+        self._show_duplicates = show
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row, source_parent):
+        model = self.sourceModel()
+        # Duplicate filter
+        if not self._show_duplicates:
+            feature = model._features[source_row] if source_row < len(model._features) else None
+            if feature and feature.is_duplicate:
+                return False
+        # Text filter
         if not self._filter_text:
             return True
         model = self.sourceModel()

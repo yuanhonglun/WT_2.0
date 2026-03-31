@@ -92,8 +92,11 @@ def run_stage5(
 
             for idx in comp:
                 active[idx].adduct_group_id = group_id
+                active[idx].duplicate_group_id = group_id + 100000  # offset to avoid collision with isotope ids
+                active[idx].duplicate_type = "adduct"
                 if idx != rep_idx:
                     active[idx].status = "adduct_removed"
+                    active[idx].is_duplicate = True
                     # Try to assign adduct type from labels
                     key1 = (min(idx, rep_idx), max(idx, rep_idx))
                     if key1 in adduct_labels:
@@ -107,9 +110,7 @@ def run_stage5(
                     n_removed += 1
             group_id += 1
 
-        features_by_replicate[rep_id] = [
-            f for f in features if f.status == "active"
-        ]
+        # Keep all features (removed ones are marked is_duplicate=True)
 
         logger.info(
             "  Replicate %s: %d -> %d (%d adduct groups, %d removed)",

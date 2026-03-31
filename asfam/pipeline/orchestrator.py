@@ -17,6 +17,7 @@ from asfam.pipeline.stage2b_inference import run_stage2b
 from asfam.pipeline.stage3_merge_segments import run_stage3
 from asfam.pipeline.stage4_isotope_dedup import run_stage4
 from asfam.pipeline.stage5_adduct_dedup import run_stage5
+from asfam.pipeline.stage5b_duplicate_detection import run_stage5b
 from asfam.pipeline.stage6_isf_detection import run_stage6
 from asfam.pipeline.stage6b_annotation import run_stage6b_annotation
 from asfam.pipeline.stage7_alignment import run_stage7
@@ -178,6 +179,21 @@ class PipelineOrchestrator:
         }
         self._emit("stage5", 1, 1, f"Done: {total_add} features remain")
 
+        # Stage 5b: Duplicate detection
+        self._check_cancel()
+        self._emit("stage5b", 0, 1, "Duplicate detection...")
+        t0 = time.time()
+        features_by_rep = run_stage5b(features_by_rep, self.config, self._emit)
+        n_dups = sum(
+            sum(1 for f in feats if f.is_duplicate)
+            for feats in features_by_rep.values()
+        )
+        self.stage_stats["Stage 5b: Duplicate Detection"] = {
+            "duplicates_flagged": n_dups,
+            "time_sec": round(time.time() - t0, 1),
+        }
+        self._emit("stage5b", 1, 1, f"Done: {n_dups} duplicates flagged")
+
         # Stage 6: ISF detection
         self._check_cancel()
         self._emit("stage6", 0, 1, "ISF detection...")
@@ -204,6 +220,17 @@ class PipelineOrchestrator:
             "time_sec": round(time.time() - t0, 1),
         }
         self._emit("stage6b", 1, 1, "Annotation complete")
+
+        # Duplicate features (is_duplicate=True) are now kept in the list
+        # by stages 4/5/5b/6 with status "xxx_removed". Restore status to
+        # "active" so alignment includes them; the is_duplicate flag controls
+        # visibility in the UI and export.
+        for rep_id, feats in features_by_rep.items():
+            for f in feats:
+                if f.is_duplicate and f.status != "active":
+                    f.status = "active"
+                if f.is_duplicate and not f.duplicate_type:
+                    f.duplicate_type = "spectral"
 
         # Stage 7: Alignment
         self._check_cancel()

@@ -131,15 +131,17 @@ def run_stage4(
 
             for idx in comp:
                 active[idx].isotope_group_id = group_id
+                active[idx].duplicate_group_id = group_id
+                active[idx].duplicate_type = "isotope"
                 if idx != rep_idx:
                     active[idx].status = "isotope_removed"
+                    active[idx].is_duplicate = True
                     n_removed += 1
             group_id += 1
 
-        # Update feature list: keep active only
-        features_by_replicate[rep_id] = [
-            f for f in features if f.status == "active"
-        ]
+        # Keep all features (removed ones are marked is_duplicate=True)
+        # Downstream stages filter by status=="active" when building their
+        # working set, so removed features won't interfere.
 
         logger.info(
             "  Replicate %s: %d -> %d (%d isotope groups, %d removed)",
