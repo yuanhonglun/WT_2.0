@@ -96,7 +96,7 @@ def run_stage6(
                     child.duplicate_type = "isf"
                     child.isf_parent_id = parent.feature_id
                     # Link parent and child via duplicate_group_id
-                    isf_gid = 200000 + n_isf
+                    isf_gid = 200000 + n_removed
                     child.duplicate_group_id = isf_gid
                     if parent.duplicate_group_id is None:
                         parent.duplicate_group_id = isf_gid
