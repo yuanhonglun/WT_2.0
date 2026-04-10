@@ -11,14 +11,18 @@ The software provides a complete feature extraction pipeline from raw mzML files
 ## Key Features
 
 - **MS1/MS2 dual-driven feature detection**: Combines MS2-driven extraction (EIC peak detection and RT clustering) with complementary MS1-driven detection for comprehensive metabolome coverage
-- **Two-pass MS1 assignment**: Strict and relaxed passes maximize the number of features with directly measured precursor m/z values
+- **MS2 ion recall**: Second-pass detection recovers weak co-eluting fragment ions missed by strict peak detection, yielding richer MS2 spectra
+- **Product ion m/z refinement**: Re-centroiding at chromatographic apex for higher m/z accuracy
+- **Two-pass MS1 assignment**: Exclusive batch assignment with peak shape scoring prevents cross-assignment of MS1 peaks to multiple features
 - **Multiple m/z inference strategies**: Spectral library matching and neutral loss consensus analysis infer precursor m/z for features without MS1 signal
-- **Three-layer deduplication**:
-  - Isotope removal: graph-based algorithm with three confidence tiers (MS1 pattern support, modified cosine, dual cosine + neutral loss cosine)
+- **Four-layer deduplication**:
+  - Isotope removal: graph-based algorithm with three confidence tiers (MS1 pattern support, modified cosine, dual cosine + neutral loss cosine), with strict apex RT gating and connected component RT splitting
   - Adduct consolidation: neutral mass matching validated by EIC Pearson correlation
+  - Spectral duplicate detection: cosine-based matching for near-identical co-eluting features
   - In-source fragmentation (ISF) detection: dual criteria (precursor-fragment m/z relationship + EIC correlation)
 - **Spectral library annotation**: composite similarity scoring against MSP/MGF reference libraries
 - **Cross-replicate alignment**: Gaussian similarity-based matching with gap filling
+- **Interactive GUI**: feature table, EIC/MS2 plots with dynamic labels, duplicate visualization with group connection lines
 - **GUI and CLI**: interactive graphical interface and command-line interface
 - **Open standard formats**: reads mzML, exports CSV, MGF, MSP
 
@@ -54,7 +58,7 @@ pip install -r requirements.txt
 
 ### Option 4: Pre-built Windows executable (no Python needed)
 
-Download `ASFAMProcessor_v0.2.260326_win64.zip` from [Releases](https://github.com/yuanhonglun/WT_2.0/releases), unzip, and run `ASFAMProcessor.exe`.
+Download `ASFAMProcessor_v0.3.260411_win64.zip` from [Releases](https://github.com/yuanhonglun/WT_2.0/releases), unzip, and run `ASFAMProcessor.exe`.
 
 ### Requirements
 
@@ -138,13 +142,14 @@ Supported formats:
 
 ```
 Stage 0: Load          → Parse mzML files, organize scan cycles
-Stage 1: MS2 Detection → Extract product ion EICs, detect peaks, cluster by RT
+Stage 1: MS2 Detection → Extract product ion EICs, detect peaks, cluster by RT, ion recall
 Stage 1b: MS1 Detection → Detect MS1-only features (weak/no fragmentation)
-Stage 2: MS1 Assignment → Two-pass precise m/z assignment from MS1 spectra
+Stage 2: MS1 Assignment → Exclusive batch m/z assignment with shape scoring
 Stage 2.5: m/z Inference → Library matching + neutral loss consensus for MS2-only features
 Stage 3: Segment Merge  → Remove boundary duplicates across m/z segments
 Stage 4: Isotope Dedup  → Graph-based isotope cluster removal (3 confidence tiers)
 Stage 5: Adduct Dedup   → Neutral mass matching + EIC correlation validation
+Stage 5b: Spectral Dedup → Cosine-based duplicate detection for co-eluting features
 Stage 6: ISF Detection  → Dual-criteria in-source fragmentation removal
 Stage 6.5: Annotation   → Spectral library matching (composite similarity)
 Stage 7: Alignment      → Cross-replicate Gaussian similarity matching + gap filling

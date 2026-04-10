@@ -48,7 +48,8 @@ def run_stage4(
                 if rt_diff > config.isotope_rt_tolerance * 3:
                     break
 
-                if rt_diff > config.isotope_rt_tolerance:
+                # Strict apex RT gate: isotopes must have very close apex RTs
+                if rt_diff > config.isotope_apex_rt_strict:
                     continue
 
                 # Peak overlap check
@@ -70,7 +71,8 @@ def run_stage4(
                     continue
 
                 # MS1 isotope support check
-                if _has_ms1_isotope_support(fi, fj, config.isotope_mz_tolerance):
+                if _has_ms1_isotope_support(fi, fj, config.isotope_mz_tolerance,
+                                            rt_tolerance=config.isotope_apex_rt_strict):
                     adjacency[i].add(j)
                     adjacency[j].add(i)
                     n_edges += 1
@@ -115,7 +117,29 @@ def run_stage4(
                         n_edges += 1
 
         # Find connected components
-        components = connected_components(adjacency)
+        raw_components = connected_components(adjacency)
+
+        # Split components by RT: isotopes must co-elute tightly.
+        # Connected components can form transitive chains spanning a huge RT
+        # range.  Sort each component by RT and break at any gap larger than
+        # the strict apex tolerance — this cleanly separates RT-distant
+        # features into independent sub-groups.
+        max_rt_gap = config.isotope_apex_rt_strict
+        components = []
+        for comp in raw_components:
+            if len(comp) <= 1:
+                components.append(comp)
+                continue
+            sorted_comp = sorted(comp, key=lambda idx: active[idx].rt_apex)
+            sub = [sorted_comp[0]]
+            for idx in sorted_comp[1:]:
+                if active[idx].rt_apex - active[sub[-1]].rt_apex <= max_rt_gap:
+                    sub.append(idx)
+                else:
+                    components.append(sub)
+                    sub = [idx]
+            components.append(sub)
+
         group_id = 0
         n_removed = 0
         for comp in components:
@@ -156,8 +180,13 @@ def run_stage4(
 
 def _has_ms1_isotope_support(
     fa: CandidateFeature, fb: CandidateFeature, tol: float,
+    rt_tolerance: float = 0.05,
 ) -> bool:
     """Check if MS1 isotope patterns support a relationship."""
+    # Require RT proximity — true isotopes co-elute
+    if abs(fa.rt_apex - fb.rt_apex) > rt_tolerance:
+        return False
+
     if fa.ms1_isotopes and fb.ms1_precursor_mz is not None:
         for mz, _ in fa.ms1_isotopes:
             if abs(mz - fb.ms1_precursor_mz) <= tol:

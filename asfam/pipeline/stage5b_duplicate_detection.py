@@ -91,8 +91,29 @@ def run_stage5b(
             continue
 
         # Find connected components
-        components = connected_components(adjacency)
-        group_id_base = total_flagged
+        raw_components = connected_components(adjacency)
+
+        # Split components by RT: duplicates must have close retention times.
+        # Connected components can form transitive chains spanning a huge RT
+        # range.  Sort each component by RT and break at any gap larger than
+        # the pairwise tolerance.
+        max_rt_gap = config.duplicate_rt_tolerance
+        components = []
+        for comp in raw_components:
+            if len(comp) <= 1:
+                components.append(comp)
+                continue
+            sorted_comp = sorted(comp, key=lambda idx: active[idx].rt_apex)
+            sub = [sorted_comp[0]]
+            for idx in sorted_comp[1:]:
+                if active[idx].rt_apex - active[sub[-1]].rt_apex <= max_rt_gap:
+                    sub.append(idx)
+                else:
+                    components.append(sub)
+                    sub = [idx]
+            components.append(sub)
+
+        group_id_base = 300000 + total_flagged
         n_groups = 0
         n_flagged = 0
 

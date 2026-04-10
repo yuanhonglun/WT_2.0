@@ -73,6 +73,13 @@ class MS2PlotWidget(QWidget):
         self._axis_drag_which = None
         self._axis_drag_start_px = None
 
+        # Dynamic label data
+        self._query_mz = None
+        self._query_rel_int = None
+        self._ref_mz = None
+        self._ref_rel_int = None
+        self._annotations: list = []
+
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("button_release_event", self._on_release)
@@ -106,6 +113,7 @@ class MS2PlotWidget(QWidget):
         if feat is None:
             return
         self.ax.clear()
+        self._annotations = []  # ax.clear() already removed them from canvas
         mz = feat.ms2_mz
         intensity = feat.ms2_intensity
 
@@ -150,7 +158,11 @@ class MS2PlotWidget(QWidget):
             mz, rel_int, linefmt="-", markerfmt=" ", basefmt="-")
         stemlines.set_color(THEME_BLUE); stemlines.set_linewidth(1.5)
         baseline.set_color("gray"); baseline.set_linewidth(0.5)
-        self._label_top_peaks(mz, rel_int, y_offset=3, color="#333")
+        self._query_mz = mz
+        self._query_rel_int = rel_int
+        self._ref_mz = None
+        self._ref_rel_int = None
+        self._update_labels()
         self.ax.set_xlabel("m/z", fontsize=9)
         self.ax.set_ylabel("Relative Intensity (%)", fontsize=9)
         self.ax.set_ylim(0, 115)
@@ -163,7 +175,6 @@ class MS2PlotWidget(QWidget):
         markerline, stemlines, baseline = self.ax.stem(
             mz, rel_int, linefmt="-", markerfmt=" ", basefmt=" ")
         stemlines.set_color(THEME_BLUE); stemlines.set_linewidth(1.5)
-        self._label_top_peaks(mz, rel_int, y_offset=3, color=THEME_BLUE)
         ref_mz = np.array([p[0] for p in ref_peaks])
         ref_int = np.array([p[1] for p in ref_peaks])
         max_ref = np.max(ref_int) if len(ref_int) > 0 else 1
@@ -171,7 +182,11 @@ class MS2PlotWidget(QWidget):
         markerline2, stemlines2, baseline2 = self.ax.stem(
             ref_mz, ref_rel, linefmt="-", markerfmt=" ", basefmt=" ")
         stemlines2.set_color("#E05050"); stemlines2.set_linewidth(1.5)
-        self._label_top_peaks(ref_mz, ref_rel, y_offset=-8, color="#E05050", top_n=8)
+        self._query_mz = mz
+        self._query_rel_int = rel_int
+        self._ref_mz = ref_mz
+        self._ref_rel_int = ref_rel
+        self._update_labels()
         self.ax.axhline(0, color="gray", linewidth=0.8)
         self.ax.set_xlabel("m/z", fontsize=9)
         self.ax.set_ylabel("Relative Intensity (%)", fontsize=9)
@@ -185,6 +200,7 @@ class MS2PlotWidget(QWidget):
                      fontsize=8, color="#E05050", va="bottom")
 
     def _label_top_peaks(self, mz, rel_int, y_offset=3, color="#333", top_n=8):
+        """Legacy static labeling (kept for compatibility)."""
         abs_int = np.abs(rel_int)
         n_labels = min(top_n, len(mz))
         top_indices = np.argsort(abs_int)[-n_labels:]
@@ -193,6 +209,79 @@ class MS2PlotWidget(QWidget):
                 self.ax.annotate(f"{mz[idx]:.3f}", (mz[idx], rel_int[idx]),
                                  textcoords="offset points", xytext=(0, y_offset),
                                  ha="center", fontsize=6.5, color=color)
+
+    def _update_labels(self):
+        """Recalculate and draw peak labels for the current viewport."""
+        for ann in self._annotations:
+            try:
+                ann.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._annotations = []
+
+        if self._query_mz is None:
+            return
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        # Label query peaks
+        q_color = "#333" if self._ref_mz is None else THEME_BLUE
+        self._label_visible_peaks(
+            self._query_mz, self._query_rel_int,
+            xlim, ylim, y_offset=3, color=q_color, max_labels=15,
+        )
+
+        # Label reference peaks (mirror mode)
+        if self._ref_mz is not None and self._ref_rel_int is not None:
+            self._label_visible_peaks(
+                self._ref_mz, self._ref_rel_int,
+                xlim, ylim, y_offset=-8, color="#E05050", max_labels=15,
+            )
+
+    def _label_visible_peaks(self, mz, rel_int, xlim, ylim, y_offset, color,
+                             max_labels=15):
+        """Label peaks visible in the current viewport with overlap avoidance."""
+        if mz is None or len(mz) == 0:
+            return
+
+        abs_int = np.abs(rel_int)
+
+        # Filter to visible range
+        y_lo, y_hi = min(ylim), max(ylim)
+        visible_mask = (
+            (mz >= xlim[0]) & (mz <= xlim[1]) &
+            (rel_int >= y_lo) & (rel_int <= y_hi)
+        )
+        visible_idx = np.where(visible_mask)[0]
+        if len(visible_idx) == 0:
+            return
+
+        # Sort by absolute intensity descending
+        sorted_idx = visible_idx[np.argsort(-abs_int[visible_idx])]
+
+        # Minimum m/z spacing to avoid overlap (3% of visible range)
+        mz_range = xlim[1] - xlim[0]
+        min_spacing = mz_range * 0.03 if mz_range > 0 else 0.1
+
+        placed_mz = []
+        n_placed = 0
+
+        for idx in sorted_idx:
+            if n_placed >= max_labels:
+                break
+            too_close = any(abs(mz[idx] - pmz) < min_spacing for pmz in placed_mz)
+            if too_close:
+                continue
+
+            ann = self.ax.annotate(
+                f"{mz[idx]:.3f}", (mz[idx], rel_int[idx]),
+                textcoords="offset points", xytext=(0, y_offset),
+                ha="center", fontsize=6.5, color=color,
+            )
+            self._annotations.append(ann)
+            placed_mz.append(mz[idx])
+            n_placed += 1
 
     def clear(self):
         self.ax.clear()
@@ -212,6 +301,7 @@ class MS2PlotWidget(QWidget):
         x, y = event.xdata, event.ydata
         self.ax.set_xlim(x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor)
         self.ax.set_ylim(y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor)
+        self._update_labels()
         self.canvas.draw_idle()
 
     def _on_press(self, event):
@@ -232,6 +322,7 @@ class MS2PlotWidget(QWidget):
                 if self._default_xlim and self._default_ylim:
                     self.ax.set_xlim(self._default_xlim)
                     self.ax.set_ylim(self._default_ylim)
+                    self._update_labels()
                     self.canvas.draw_idle()
                 return
             self._drag_active = True
@@ -250,11 +341,15 @@ class MS2PlotWidget(QWidget):
         if event.button == 1 and self._axis_drag_active:
             self._axis_drag_active = False
             self._axis_drag_start_px = None
+            self._update_labels()
+            self.canvas.draw_idle()
             return
         if event.button == 1 and self._drag_active:
             self._drag_active = False
             self._drag_start_px = None
             self._drag_axis = None
+            self._update_labels()
+            self.canvas.draw_idle()
         elif event.button == 3 and self._zoom_active:
             self._zoom_active = False
             if self._zoom_rect:
@@ -268,6 +363,7 @@ class MS2PlotWidget(QWidget):
                 if abs(y1 - y0) > 1e-6:
                     self.ax.set_ylim(min(y0, y1), max(y0, y1))
             self._zoom_start = None
+            self._update_labels()
             self.canvas.draw_idle()
 
     def _on_motion(self, event):

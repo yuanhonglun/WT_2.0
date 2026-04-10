@@ -179,7 +179,7 @@ python -m asfam.gui.app
 1. Click **Run Pipeline** on the toolbar
 2. Monitor progress in the progress bar and log panel
 3. Processing stages execute sequentially:
-   - Load -> MS2 Detection -> MS1 Detection -> MS1 Assignment -> m/z Inference -> Segment Merge -> Isotope Dedup -> Adduct Dedup -> ISF Detection -> Annotation -> Alignment -> Export
+   - Load -> MS2 Detection (with ion recall) -> MS1 Detection -> MS1 Assignment -> m/z Inference -> Segment Merge -> Isotope Dedup -> Adduct Dedup -> Spectral Dedup -> ISF Detection -> Annotation -> Alignment -> Export
 
 #### Step 4: Explore Results
 
@@ -308,10 +308,14 @@ For each HR-MRM channel (1 Da precursor window):
 3. **Peak Detection**: scipy.signal.find_peaks identifies chromatographic peaks with constraints:
    - Height >= 200 counts (configurable)
    - Signal-to-noise >= 5
-   - Width >= 5 scans
+   - Width >= 3 scans
    - Gaussian shape similarity >= 0.6
 
 4. **RT Clustering**: Peaks within the same channel are clustered by retention time (0.02 min tolerance) to assemble MS2 spectra. Each cluster becomes a candidate feature.
+
+5. **Ion Recall (Second Pass)**: After initial detection, a second pass revisits all product ion EICs to recover weak co-eluting ions missed by strict peak detection. For each feature's consensus apex RT, ions with raw intensity >= 50 counts and at least 2 consecutive nonzero cycles are recalled. This yields richer MS2 spectra.
+
+6. **Product Ion m/z Refinement**: Each product ion's m/z is re-centroided using only the raw data at the chromatographic apex (+/-1 cycle), providing higher m/z accuracy than the global EIC-averaged value.
 
 ### Stage 1b: MS1-Driven Feature Detection
 
@@ -323,14 +327,17 @@ Captures compounds visible in MS1 but with weak or no fragmentation:
 
 ### Stage 2: MS1 Assignment
 
-Assigns precise precursor m/z from MS1 data:
+Assigns precise precursor m/z from MS1 data using exclusive batch assignment.
+Features are grouped by (segment, channel) and MS1 peaks are assigned using a
+scoring function that combines RT proximity with peak shape overlap ratio.
+Each MS1 peak can only be assigned to one MS2 feature (prevents cross-assignment).
 
-**Pass 1 (Strict)**: MS1 height >= 100, S/N >= 5, RT tolerance 0.1 min
+**Pass 1 (Strict)**: MS1 height >= 100, S/N >= 5, RT tolerance 0.05 min
 - Extracts isotope pattern (up to 5 isotopes, C13 spacing 1.00335 Da)
 - Computes intensity-weighted centroid m/z
 - Marks feature as "ms1_detected"
 
-**Pass 2 (Relaxed)**: Height >= 50, S/N >= 2, RT tolerance 0.15 min
+**Pass 2 (Relaxed)**: Height >= 50, S/N >= 2, RT tolerance 0.1 min
 - Assigns m/z for weaker signals missed in Pass 1
 - Feature remains "ms2_only" but with improved m/z accuracy
 
@@ -361,14 +368,14 @@ Removes boundary duplicates from adjacent m/z segments:
 
 Graph-based algorithm identifying isotope clusters:
 
-**Candidate pairs**: RT diff <= 0.01 min, peak overlap >= 80%
+**Candidate pairs**: RT diff <= 0.1 min (search window), apex RT diff <= 0.05 min (hard max), peak overlap >= 80%
 
 **Three evidence tiers for edges**:
 1. **MS1 isotope pattern**: Feature j's m/z matches feature i's detected isotope peaks
 2. **Modified cosine** (classic gaps: C13, N15, S34, O18, Cl37, Br81): Score >= 0.85, >= 3 matched fragments
 3. **Dual metric** (relaxed near-integer gaps): Modified cosine >= 0.90 with >= 4 matches AND neutral loss cosine >= 0.85 with >= 3 matches
 
-Connected components identify isotope groups. Monoisotopic representative (lowest m/z, highest intensity) is retained.
+Connected components identify isotope groups. Components are split by RT to prevent transitive chains from linking unrelated features. Monoisotopic representative (lowest m/z, highest intensity) is retained.
 
 ### Stage 5: Adduct Deduplication
 
@@ -381,6 +388,16 @@ Identifies and consolidates different adducts of the same compound:
 3. Check neutral mass agreement (tolerance 0.02 Da)
 4. Validate by EIC Pearson correlation (>= 0.9)
 5. Keep representative with highest MS1 intensity
+
+### Stage 5b: Spectral Duplicate Detection
+
+Detects and removes near-identical co-eluting features that escaped isotope and adduct deduplication:
+
+- RT difference <= 0.2 min
+- m/z difference <= 0.5 Da
+- MS2 cosine similarity >= 0.85 with >= 3 matched fragments
+- Graph-based resolution with RT-aware component splitting
+- Retains feature with highest MS1 intensity per group
 
 ### Stage 6: ISF Detection
 
@@ -440,20 +457,30 @@ Outputs:
 | eic_smoothing_polyorder | int | 3 | Polynomial order |
 | peak_height_threshold | float | 200.0 | Minimum peak height (counts) |
 | peak_sn_threshold | float | 5.0 | Minimum signal-to-noise ratio |
-| peak_width_min | int | 5 | Minimum peak width (scans) |
+| peak_width_min | int | 3 | Minimum peak width (scans) |
 | peak_prominence | float | 100.0 | Minimum peak prominence |
 | peak_gaussian_threshold | float | 0.6 | Gaussian shape similarity (0=off) |
 | rt_cluster_tolerance | float | 0.02 | RT clustering tolerance (min) |
 | min_fragments_per_feature | int | 2 | Minimum product ions per feature |
+
+### Stage 1: MS2 Ion Recall (Second Pass)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| recall_enabled | bool | True | Enable ion recall second pass |
+| recall_min_intensity | float | 50.0 | Minimum raw intensity at apex |
+| recall_min_consecutive | int | 2 | Minimum consecutive nonzero cycles |
+| recall_apex_window | int | 2 | +/- cycles around apex to search |
 
 ### Stage 2: MS1 Assignment
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | ms1_mz_tolerance | float | 0.01 | m/z matching tolerance (Da) |
-| ms1_rt_tolerance | float | 0.1 | RT matching tolerance (min) |
+| ms1_rt_tolerance | float | 0.05 | RT matching tolerance (min) |
 | ms1_min_height | float | 100.0 | Minimum MS1 peak height |
 | ms1_isotope_mz_tol | float | 0.01 | Isotope pattern m/z tolerance (Da) |
+| ms1_shape_weight | float | 0.3 | Weight for peak shape in scoring |
 
 ### Stage 2.5: m/z Inference
 
@@ -477,7 +504,8 @@ Outputs:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| isotope_rt_tolerance | float | 0.01 | RT tolerance (min) |
+| isotope_rt_tolerance | float | 0.1 | RT search window (min) |
+| isotope_apex_rt_strict | float | 0.05 | Hard max apex RT difference (min) |
 | isotope_overlap_ratio | float | 0.80 | Peak overlap ratio |
 | isotope_mz_tolerance | float | 0.01 | m/z tolerance for classic gaps (Da) |
 | isotope_integer_step_tolerance | float | 0.02 | m/z tolerance for relaxed gaps (Da) |
@@ -496,6 +524,15 @@ Outputs:
 | adduct_rt_tolerance | float | 0.05 | RT tolerance (min) |
 | adduct_mw_tolerance | float | 0.02 | Neutral mass tolerance (Da) |
 | adduct_eic_pearson_threshold | float | 0.9 | EIC correlation threshold |
+
+### Stage 5b: Spectral Duplicate Detection
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| duplicate_rt_tolerance | float | 0.2 | RT tolerance (min) |
+| duplicate_mz_tolerance | float | 0.5 | m/z tolerance (Da) |
+| duplicate_cosine_threshold | float | 0.85 | MS2 cosine similarity threshold |
+| duplicate_min_matched | int | 3 | Minimum matched fragments |
 
 ### Stage 6: ISF Detection
 
@@ -532,7 +569,7 @@ Outputs:
 | final_sn_threshold | float | 5.0 | Final S/N filter |
 | final_gaussian_threshold | float | 0.6 | Final gaussian similarity |
 | msms_intensity_threshold | float | 1000.0 | MS/MS intensity minimum |
-| msms_relative_threshold | float | 0.05 | MS/MS relative intensity |
+| msms_relative_threshold | float | 0.01 | MS/MS relative intensity |
 | msms_min_ions | int | 1 | Minimum MS/MS ions |
 
 ---

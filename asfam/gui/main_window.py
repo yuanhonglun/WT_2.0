@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ASFAMProcessor v0.3.260330a")
+        self.setWindowTitle("ASFAMProcessor v0.3.260411")
         self.resize(1400, 900)
 
         # Set icon

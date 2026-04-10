@@ -1,0 +1,762 @@
+================================================================================
+ASFAM Acquisition Mode & ASFAMProcessor Software: Technical Description
+================================================================================
+Version: 0.3.260411
+Author: Honglun Yuan, Hainan University
+Date: 2026-04-11
+
+This document provides a complete technical description of:
+(1) The ASFAM (All-ion Stepwise Fragmentation Acquisition Mode) data acquisition method
+(2) The ASFAMProcessor software pipeline for processing ASFAM data
+
+It is intended as a reference for understanding the method and assisting with
+manuscript writing, review responses, and technical discussions.
+
+================================================================================
+PART 1: ASFAM ACQUISITION MODE
+================================================================================
+
+1.1 OVERVIEW
+------------
+ASFAM is a novel LC-QTOF mass spectrometry acquisition mode designed to capture
+high-resolution MS2 spectra with substantially reduced chimericity for virtually
+all precursor ions, including low-abundance compounds that are invisible in MS1
+scans. It was developed on the Sciex ZenoTOF 7600 instrument.
+
+1.2 ACQUISITION SCHEME
+-----------------------
+Each sample is analyzed using 10 separate methods, each covering a 100 Da m/z range:
+  Method 1:  m/z  75 - 174
+  Method 2:  m/z 175 - 274
+  Method 3:  m/z 275 - 374
+  ...
+  Method 10: m/z 975 - 1075
+
+Each method consists of scan cycles. Each cycle contains:
+  - 1 MS1 scan: covers the full m/z range of that method (e.g., 75-174)
+  - 100 HR-MRM (High-Resolution Multiple Reaction Monitoring) MS2 scans:
+    Each HR-MRM scan isolates a 1 Da precursor window and fragments it.
+    The 100 windows step through the method's m/z range at 1 Da intervals.
+    For example, in Method 1: precursor windows at m/z 75, 76, 77, ..., 174.
+
+Total: 10 methods x 100 HR-MRM channels = 1000 precursor windows covering m/z 75-1075.
+
+1.3 HR-MRM MODE VS STANDARD SWATH/DIA
+--------------------------------------
+HR-MRM differs from standard SWATH/DIA in two key ways:
+
+(a) Per-channel product ion scan range optimization:
+    In HR-MRM, each precursor channel has its own product ion (Q3) scan range.
+    For precursor m/z = 100, the product ion range is 50-103 Da.
+    For precursor m/z = 500, the product ion range is 50-503 Da.
+    This reduces background noise compared to SWATH, where all channels share
+    the same product ion scan range.
+
+(b) Optimized MRM channel values:
+    MRM channel center m/z values are fitted to the natural distribution of
+    metabolite molecular weights using a linear regression model trained on
+    560,000+ natural metabolites from HMDB, COCONUT, and PMhub databases.
+    This ensures higher response for metabolites across all mass ranges.
+
+    The fitted equation (applied to each integer m/z):
+    Optimized_channel_mz = regression_intercept + regression_slope * integer_mz
+    (Rounded to one decimal place, maintaining 1 Da intervals)
+
+1.4 KEY PARAMETERS
+------------------
+- Cycle time: approximately 0.8-1.0 seconds
+- Accumulation time per MS2 scan: approximately 6-8 ms
+- Zeno trap enhancement: provides ~5-10x sensitivity improvement for MS2
+- Collision energy: 35 eV (fixed; stepped CE under evaluation)
+- Chromatographic peak width: typically 6-8 seconds
+- Data points per chromatographic peak: 8-12
+
+1.5 SIGNAL TYPES
+----------------
+The ASFAM data contains two categories of features:
+
+(a) High-abundance features (HFs / MS1-detected):
+    Precursor ions that produce detectable signal in both MS1 and MS2 scans.
+    These can be assigned precise precursor m/z from the MS1 spectrum.
+
+(b) Low-abundance features (LFs / MS2-only):
+    Precursor ions that are too weak to be detected in the MS1 scan, but
+    whose product ions ARE captured by the HR-MRM scan due to its higher
+    sensitivity. These features lack a directly measured precursor m/z.
+
+1.6 ADVANTAGES
+--------------
+- Nearly all precursor ions get MS2 spectra (not limited by DDA top-N)
+- 1 Da isolation window produces MS2 with substantially reduced chimericity
+  compared to wider-window DIA (5-25 Da SWATH)
+- Captures low-abundance compounds invisible in MS1 (the metabolome's "dark matter")
+- High-resolution data for both MS1 and MS2
+
+1.7 LIMITATIONS
+---------------
+- Requires 10 injections per sample (reduced throughput)
+- 1 Da window can still co-isolate isobars, isotopologues, adducts, and
+  co-eluting metabolites (NOT truly "deconvolution-free")
+- Fixed collision energy may not be optimal for all metabolite classes
+- Currently implemented only on Sciex ZenoTOF 7600
+
+
+================================================================================
+PART 2: ASFAMProcessor SOFTWARE PIPELINE
+================================================================================
+
+ASFAMProcessor is an open-source Python pipeline that processes ASFAM data from
+raw mzML files to annotated feature tables. It provides both GUI (PyQt5) and
+CLI interfaces.
+
+The pipeline consists of 13 sequential stages:
+
+2.1 STAGE 0: DATA LOADING
+--------------------------
+Input: mzML files (one per segment x replicate)
+Output: dict[replicate_id -> list[RawSegmentData]]
+
+- Parses mzML files using pymzml library (streaming, not loading all into memory)
+- Each scan cycle is organized into: 1 MS1 scan + N HR-MRM product ion scans
+- MS2 data are centroided on-the-fly using local maximum detection
+  (for each local maximum, intensity-weighted mean m/z is computed from 3 points)
+- Files are automatically grouped by sample and replicate based on filename patterns
+- Filename convention: SAMPLE_100-129_rep1.mzML (sample_seglow-seghigh_rep)
+
+Data model per cycle (ScanCycle):
+  - cycle_index: int
+  - rt: float (retention time in minutes)
+  - ms1_mz: numpy array (MS1 m/z values)
+  - ms1_intensity: numpy array (MS1 intensities)
+  - ms2_scans: dict[precursor_mz_int -> (product_mz_array, product_int_array)]
+
+
+2.2 STAGE 1: MS2-DRIVEN FEATURE DETECTION
+-------------------------------------------
+Input: RawSegmentData for all files
+Output: dict[replicate_id -> list[CandidateFeature]]
+
+This is the primary detection method. For each HR-MRM channel (1 Da window):
+
+Step 1 - EIC Extraction:
+  - The product ion m/z range is divided into fixed-width bins (default 0.02 Da)
+  - An extracted ion chromatogram (EIC) is built for each bin across all scan cycles
+  - Implementation: numpy searchsorted-based binning for speed
+  - EICs with insufficient signal (total intensity < threshold or fewer than
+    peak_width_min consecutive nonzero points) are discarded
+
+Step 2 - EIC Smoothing:
+  - Savitzky-Golay filter (window=7, polyorder=3) from scipy.signal
+
+Step 3 - Peak Detection:
+  - scipy.signal.find_peaks with constraints:
+    * Height >= 200 counts (peak_height_threshold)
+    * Signal-to-noise ratio >= 5 (peak_sn_threshold)
+    * Minimum width >= 3 scans (peak_width_min)
+    * Prominence >= 100 counts (peak_prominence)
+  - Noise estimation: lower quartile of intensities in the EIC
+  - Peak boundaries: expand left/right until intensity drops to valley or
+    5% of apex height
+  - Area: numpy trapezoidal integration (np.trapz)
+  - Gaussian similarity: compare peak shape to ideal Gaussian curve (threshold 0.6)
+  - Validation: check raw (unsmoothed) data for consecutive nonzero points
+    to reject smoothing artifacts
+
+Step 4 - RT Clustering:
+  - All detected peaks from the same HR-MRM channel are clustered by RT
+  - Two criteria for clustering: apex proximity (RT diff <= 0.02 min) OR
+    peak boundary overlap
+  - Within each cluster, duplicate product ions (same m/z within 0.005 Da)
+    are deduplicated (keep highest intensity)
+  - Post-clustering merge of adjacent clusters with overlapping RT ranges
+  - Each cluster = one CandidateFeature with assembled MS2 spectrum
+
+Step 5 - Quality Filtering:
+  - Remove features with fewer than 2 product ions (min_fragments_per_feature)
+  - Remove flat-top noise (ions with identical intensity across multiple fragments)
+  - Validate EIC dynamic range >= 3.0
+
+Step 6 - Ion Recall (Second Pass):
+  - After initial detection and clustering, a second pass revisits ALL product
+    ion EICs to recover weak co-eluting ions missed by strict peak detection
+  - For each cluster's consensus apex RT, searches within +/-2 cycles
+    (recall_apex_window) for ions with:
+    * Raw intensity >= 50 counts (recall_min_intensity) at the apex
+    * At least 2 consecutive nonzero cycles (recall_min_consecutive) around apex
+  - This recovers low-abundance fragment ions that show clear co-elution
+    evidence but were below the strict peak detection thresholds
+  - Controlled by recall_enabled config parameter (default: True)
+
+Step 7 - Product Ion m/z Refinement:
+  - Each product ion's m/z is re-centroided using only the raw data at the
+    chromatographic apex (+/-1 cycle), rather than the global EIC-averaged m/z
+    (which includes noisy off-peak scans)
+  - Uses intensity-weighted averaging for higher m/z accuracy
+
+Output per feature (CandidateFeature):
+  - feature_id: "{segment}_{precursor}_{index}"
+  - precursor_mz_nominal: integer precursor channel (e.g., 100)
+  - rt_apex, rt_left, rt_right: retention time bounds
+  - ms2_mz: numpy array of product ion m/z values
+  - ms2_intensity: numpy array of product ion intensities
+  - n_fragments: number of product ions
+  - signal_type: initially "high_response" (updated later in Stage 2)
+
+
+2.3 STAGE 1b: MS1-DRIVEN FEATURE DETECTION (COMPLEMENTARY)
+------------------------------------------------------------
+Input: RawSegmentData + existing CandidateFeatures from Stage 1
+Output: Updated dict[replicate_id -> list[CandidateFeature]]
+
+Purpose: Capture compounds visible in MS1 but missed by MS2-driven detection
+(e.g., compounds with weak or no fragmentation).
+
+Algorithm:
+  - For each nominal m/z channel not already well-covered by Stage 1:
+    1. Extract MS1 EIC within the 1 Da channel window
+    2. Detect peaks in MS1 EIC
+    3. Check if MS1 peaks overlap with existing MS2-detected features
+    4. For novel MS1 peaks (no overlap):
+       a. Extract co-eluting MS2 product ions from the HR-MRM data
+       b. For each candidate product ion, build its EIC within the peak range
+       c. Validate co-elution: ion apex within +/-3 cycles of MS1 apex
+       d. Require signal at MS1 apex cycle
+       e. Use adaptive m/z tolerance (PPM-based for higher channels)
+    5. Create new CandidateFeature with detection_source="ms1_driven"
+
+
+2.4 STAGE 2: MS1 ASSIGNMENT (EXCLUSIVE BATCH)
+-----------------------------------------------
+Input: RawSegmentData + CandidateFeatures
+Output: Updated CandidateFeatures with precise precursor m/z
+
+Purpose: Assign precise precursor m/z values from MS1 data to each feature.
+Uses exclusive batch assignment: each MS1 peak can only be assigned to one
+MS2 feature (prevents cross-assignment of the same MS1 peak).
+
+Features are grouped by (segment, channel) and processed in batch. Within
+each group, MS1 peaks are detected once, then assigned using a scoring
+function that combines RT proximity with peak shape overlap ratio
+(configurable via ms1_shape_weight, default 0.3). Greedy best-first
+matching ensures exclusivity.
+
+PASS 1 (Strict):
+  Parameters: MS1 height >= 100 counts, S/N >= 5, RT tolerance 0.05 min
+  - For each feature group, extract MS1 EIC within the 1 Da channel window
+  - Detect peaks in MS1 EIC
+  - Score = (1 - ms1_shape_weight) * RT_proximity + ms1_shape_weight * overlap_ratio
+  - Greedy assignment: best-scoring feature gets the MS1 peak
+  - If found:
+    * Compute intensity-weighted centroid m/z at the MS1 peak apex
+    * Extract isotope pattern: up to 5 isotopes spaced by C13_DELTA (1.00335 Da)
+    * Record: ms1_precursor_mz, ms1_height, ms1_area, ms1_sn
+    * Set signal_type = "ms1_detected", mz_source = "ms1_peak"
+
+PASS 2 (Relaxed, for features not assigned in Pass 1):
+  Parameters: MS1 height >= 50 counts, S/N >= 2, RT tolerance 0.1 min
+  - Also tracks used peaks to prevent double assignment
+  - Only assigns precise m/z (not intensity/area values)
+  - Sets mz_source = "ms1_relaxed", keeps signal_type = "ms2_only"
+
+Features remaining unassigned after both passes:
+  - Classified as "ms2_only" (low-abundance features, LFs)
+  - Use highest product ion as representative (ms2_rep_ion_mz)
+
+
+2.5 STAGE 2.5: PRECURSOR m/z INFERENCE FOR MS2-ONLY FEATURES
+--------------------------------------------------------------
+Input: CandidateFeatures (ms2_only subset)
+Output: Updated features with inferred precursor m/z
+
+Purpose: Infer precise precursor m/z for features that have no MS1 signal.
+
+METHOD 1 - Spectral Library Matching:
+  - Restrict candidate library spectra by integer m/z channel (+/-1 Da)
+  - Compute composite similarity score combining:
+    * Greedy peak matching: for each query peak, find best match in reference
+      by m/z tolerance (0.02 Da), ranked by intensity product, 1-to-1 matching
+    * Precursor ion matching component
+  - Thresholds:
+    * Minimum similarity score: 0.8 (matchms_similarity_threshold)
+    * Minimum matched peaks: 3 (matchms_min_matched_peaks)
+    * Minimum matched percentage: 25% of reference peaks (matchms_min_matched_pct)
+  - If match found: use library spectrum's precursor m/z as inferred value
+  - Optional: RT-weighted scoring (matchms_use_rt)
+
+METHOD 2 - Neutral Loss Consensus (if Method 1 fails):
+  - For each fragment m/z in the feature's MS2 spectrum:
+    * Calculate candidate precursor = fragment_mz + neutral_loss
+    * For each of 26 common neutral losses:
+      H2O (18.01056), NH3 (17.02655), CO (27.99491), CO2 (43.98983),
+      HCO2H (46.00548), CH2O2 (46.00548), C2H4O2 (60.02113),
+      SO2 (63.96190), SO3 (79.95682), H3PO4 (97.97690),
+      C6H10O5 (162.05282), hexose (180.06339), etc.
+  - Cluster all candidate precursor m/z values within 0.01 Da window
+  - Score each cluster: (distinct fragment count) * 1e12 + total intensity
+  - Select the highest-scoring cluster
+  - Confidence levels:
+    * "high": >= 3 distinct fragments support the cluster
+    * "medium": 2 fragments
+    * "low": 1 fragment
+
+Pre-filter: features with < 3 fragments are skipped (min_fragments_for_inference)
+
+
+2.6 STAGE 3: CROSS-SEGMENT MERGING
+------------------------------------
+Input: CandidateFeatures by replicate
+Output: Deduplicated features (boundary duplicates removed)
+
+Purpose: Features near segment boundaries (e.g., m/z 129 in segment 100-129
+and m/z 130 in segment 130-159) may be detected in both segments.
+
+Algorithm:
+  - Within each replicate, compare features from adjacent segments
+  - Merge criteria (ALL must be met):
+    * Different segments
+    * m/z difference <= 0.02 Da (merge_mz_tolerance)
+    * RT difference <= 0.05 min (merge_rt_tolerance)
+    * MS2 cosine similarity >= 0.8 (merge_ms2_cosine_threshold)
+  - Retention: keep the feature with better MS1 data (more fragments + MS1 signal)
+  - Feature IDs reassigned: "rep{rep_id}_{index:05d}"
+
+
+2.7 STAGE 4: ISOTOPE DEDUPLICATION
+------------------------------------
+Input: Merged CandidateFeatures
+Output: Features with isotope duplicates removed
+
+Purpose: Remove isotope peaks (M+1, M+2, etc.), retaining only monoisotopic.
+
+GRAPH-BASED ALGORITHM:
+  Builds an undirected graph where nodes = features, edges = isotope relationships.
+  Connected components identify isotope clusters.
+
+CANDIDATE PAIR SELECTION:
+  - RT difference <= 0.1 min (isotope_rt_tolerance, search window)
+  - Apex RT difference <= 0.05 min (isotope_apex_rt_strict, hard maximum)
+  - Peak boundary overlap >= 80% (isotope_overlap_ratio)
+
+THREE TIERS OF EDGE EVIDENCE:
+
+  Tier 1 - MS1 Isotope Pattern Support (highest confidence):
+    Feature i's detected isotope peaks include feature j's monoisotopic m/z.
+    m/z tolerance: 0.01 Da (ms1_isotope_mz_tol)
+
+  Tier 2 - Modified Cosine Similarity (for "classic" isotope gaps):
+    Classic gaps = known isotope deltas:
+      C13: 1.00335 Da, N15: 0.99703 Da, S34: 1.99580 Da,
+      O18: 2.00425 Da, Cl37: 1.99705 Da, Br81: 1.99796 Da
+    Also multi-C13: 2*C13, 3*C13, 4*C13 (isotope_max_step = 4)
+    Criteria:
+      * Modified cosine score >= 0.85 (isotope_modified_cos_threshold)
+      * >= 3 matched fragments (isotope_min_matches)
+      * Precursor exclusion: fragments within 1.5 Da of precursor are excluded
+        from similarity calculation
+      * Additional: intensity ratio check for C13 plausibility
+
+  Tier 3 - Dual Metric (for "relaxed" near-integer gaps):
+    Relaxed gaps = near-integer steps (1-4 Da) within 0.02 Da tolerance
+    that don't match known isotope deltas exactly.
+    BOTH criteria must pass:
+      * Modified cosine >= 0.90 AND >= 4 matched peaks
+      * Neutral loss cosine >= 0.85 AND >= 3 matched neutral loss pairs
+    (More stringent than Tier 2 because the gap type is less certain)
+
+MODIFIED COSINE SIMILARITY:
+  - Standard cosine similarity but:
+    * Excludes fragments within 1.5 Da of precursor m/z
+    * Attempts both direct matching and m/z-shifted matching
+      (shift = precursor m/z difference between the two features)
+    * Returns the better of the two scores
+
+NEUTRAL LOSS COSINE SIMILARITY:
+  - Converts each fragment to a neutral loss: NL = precursor_mz - fragment_mz
+  - Computes cosine similarity on the neutral loss spectra
+  - This captures fragmentation patterns independent of precursor mass
+
+REPRESENTATIVE SELECTION:
+  Per connected component: retain lowest m/z (monoisotopic), highest intensity.
+  Connected components are split by RT: within each component, features are
+  sorted by RT and broken at any gap exceeding the pairwise tolerance, to
+  prevent transitive chains from linking unrelated features across different
+  retention times.
+  Removed features: status = "isotope_removed"
+
+
+2.8 STAGE 5: ADDUCT DEDUPLICATION
+-----------------------------------
+Input: Features after isotope dedup
+Output: Features with adduct duplicates removed
+
+Purpose: Different adducts of the same compound ([M+H]+, [M+Na]+, [M+K]+, etc.)
+produce separate features. Consolidate to one representative.
+
+ALGORITHM:
+
+Step 1 - RT Grouping:
+  Group features by RT proximity (adduct_rt_tolerance = 0.05 min)
+
+Step 2 - Adduct Pair Testing:
+  For each pair within an RT group, test against adduct rules.
+  Adduct library (positive mode):
+    [M+H]+, [M+Na]+, [M+K]+, [M+NH4]+, [M-H2O+H]+, [M+2H]2+, [M]+, etc.
+  Adduct library (negative mode):
+    [M-H]-, [M+Cl]-, [M-H2O-H]-, [M+FA-H]-, [M+CH3COO]-, etc.
+
+  Test: compute neutral mass from each feature assuming each possible adduct:
+    neutral_mass = mz_to_neutral(feature_mz, adduct_type)
+  If two features yield the same neutral mass (tolerance 0.02 Da) under any
+  adduct combination, they are candidate adduct pairs.
+
+Step 3 - EIC Correlation Validation:
+  Extract MS1 EICs for both features over the RT range [rt_left-0.1, rt_right+0.1]
+  Compute Pearson correlation coefficient.
+  Threshold: >= 0.9 (adduct_eic_pearson_threshold)
+  This confirms true co-elution (same compound, not coincidental mass match).
+
+Step 4 - Graph Resolution:
+  Build graph of confirmed adduct pairs.
+  Connected components = adduct groups.
+  Retain: feature with highest MS1 intensity.
+  Removed features: status = "adduct_removed", assigned adduct_type label.
+
+
+2.8b STAGE 5b: SPECTRAL DUPLICATE DETECTION
+---------------------------------------------
+Input: Features after adduct dedup
+Output: Features with spectral duplicates removed
+
+Purpose: Detect and remove features that are near-identical in both retention
+time and MS2 spectrum, but were not caught by isotope or adduct deduplication.
+These typically arise from co-eluting isobars or redundant detections.
+
+ALGORITHM:
+  Criteria (ALL must be met):
+    * RT difference <= 0.2 min (duplicate_rt_tolerance)
+    * m/z difference <= 0.5 Da (duplicate_mz_tolerance)
+    * MS2 cosine similarity >= 0.85 (duplicate_cosine_threshold)
+    * >= 3 matched fragment peaks (duplicate_min_matched)
+
+  Graph-based resolution: build graph, find connected components.
+  Connected components are split by RT (same as isotope dedup) to prevent
+  transitive chains from linking features across large RT gaps.
+  Retain: feature with highest MS1 intensity per component.
+  Group ID offset: 300000 + sequential (prevents collision with isotope/adduct IDs).
+  Removed features: status = "spectral_duplicate", duplicate_type = "spectral"
+
+
+2.9 STAGE 6: IN-SOURCE FRAGMENTATION (ISF) DETECTION
+------------------------------------------------------
+Input: Features after adduct dedup
+Output: Features with ISF artifacts removed
+
+Purpose: In-source fragmentation generates artifact features where a fragment
+produced at the ion source appears as a separate "precursor" ion. These are
+NOT genuine metabolites.
+
+DUAL-CRITERIA ALGORITHM (based on MassCube approach):
+
+For each candidate parent-child pair (child m/z < parent m/z, RT diff <= 0.05 min):
+
+  Criterion 1 - Precursor-Fragment Check:
+    The child feature's precursor m/z must appear as a product ion in the
+    parent's MS2 spectrum.
+    m/z tolerance: 0.02 Da (isf_ms2_mz_tolerance)
+
+  Criterion 2 - EIC Correlation:
+    Extract EICs for both parent and child features.
+    Compute Pearson correlation coefficient.
+    Threshold: >= 0.9 (isf_eic_pearson_threshold)
+    Minimum correlated scan cycles: >= 10 (isf_min_correlated_scans)
+
+BOTH criteria must be satisfied to flag a feature as ISF.
+This dual requirement minimizes both false positives and false negatives.
+
+Removed features: status = "isf_removed", isf_parent_id = parent_feature_id
+
+
+2.10 STAGE 6.5: SPECTRAL LIBRARY ANNOTATION
+---------------------------------------------
+Input: Active features after all deduplication stages
+Output: Features with annotation matches
+
+Algorithm:
+  - Load user-supplied spectral library (MSP or MGF format)
+  - Build integer m/z index for fast candidate lookup
+  - For each active feature:
+    * Find library spectra within +/-1 Da of query's integer m/z channel
+    * Compute composite similarity score:
+      - Greedy fragment matching (1-to-1, ranked by intensity product)
+      - Precursor ion matching component
+    * Filter: score >= 0.8, >= 3 matched peaks, >= 25% of reference peaks
+    * Store top 5 AnnotationMatch objects per feature
+    * Set selected_annotation_idx = 0 (best match)
+  - Also export features as MSP for external annotation (e.g., SIRIUS)
+
+
+2.11 STAGE 7: CROSS-REPLICATE ALIGNMENT
+-----------------------------------------
+Input: CandidateFeatures from all replicates
+Output: list[Feature] (final aligned features)
+
+Purpose: Align feature detections across biological replicates into consensus features.
+
+ALGORITHM:
+
+Step 1 - Reference Selection:
+  Choose the replicate with the most features as reference.
+
+Step 2 - Reference Propagation:
+  All reference features become initial aligned features.
+
+Step 3 - Match Other Replicates:
+  For each aligned feature, find the best match in each other replicate.
+  Matching score: Gaussian similarity function:
+    score = exp(-0.5 * [(mz_diff/mz_tol)^2 + (rt_diff/rt_tol)^2])
+  Weighted: mz_weight = 0.5, rt_weight = 0.5
+  Tolerances: m/z = 0.02 Da, RT = 0.1 min
+  Minimum score threshold for match acceptance.
+
+Step 4 - Gap Filling:
+  If enabled (gap_fill_enabled = True), features detected in some but not
+  all replicates are filled by re-extracting EIC signal in the expected
+  RT window (expanded by gap_fill_rt_expansion = 1.5x).
+
+Step 5 - Quantification:
+  Aggregate heights and areas from all replicates.
+  Compute: mean_height, mean_area, coefficient of variation (CV).
+
+Step 6 - Feature ID Assignment:
+  Final features get IDs: F00001, F00002, ...
+  Annotation matches propagated from reference feature.
+
+
+2.12 STAGE 8: EXPORT
+----------------------
+Output files:
+
+(a) features.csv - Complete feature table:
+    Columns: feature_id, precursor_mz, rt_min, rt_left, rt_right,
+    signal_type, n_fragments, mean_height, mean_area, cv, sn_ratio,
+    formula, adduct, name, ms2_spectrum,
+    height_rep1, area_rep1, height_rep2, area_rep2, ...
+
+(b) ms2_spectra.mgf - MS2 spectra in Mascot Generic Format
+
+(c) ms2_spectra.msp - MS2 spectra in NIST MSP format
+
+(d) processing_report.txt - Stage-by-stage statistics:
+    Feature counts at each stage, deduplication statistics,
+    runtime per stage.
+
+
+================================================================================
+PART 3: SIMILARITY METRICS
+================================================================================
+
+3.1 COSINE SIMILARITY
+  Standard dot product of intensity vectors after peak matching by m/z.
+  Peak matching: greedy approach, m/z tolerance 0.02 Da.
+
+3.2 MODIFIED COSINE SIMILARITY
+  Excludes precursor region (within 1.5 Da of precursor m/z).
+  Tries both direct and m/z-shifted matching (shift = precursor difference).
+  Returns the better score.
+
+3.3 NEUTRAL LOSS COSINE SIMILARITY
+  Converts fragments to neutral losses (precursor - fragment).
+  Computes cosine on neutral loss spectra.
+  Captures fragmentation patterns independent of precursor mass.
+
+3.4 EIC PEARSON CORRELATION
+  Cycle-by-cycle Pearson correlation of two EIC intensity profiles.
+  Used for adduct and ISF validation.
+
+3.5 COMPOSITE SIMILARITY (for library matching)
+  Combines greedy fragment matching score with precursor ion matching.
+  Used in Stage 2.5 (inference) and Stage 6.5 (annotation).
+
+
+================================================================================
+PART 4: KEY INNOVATIONS vs EXISTING TOOLS
+================================================================================
+
+4.1 MS1/MS2 DUAL-DRIVEN DETECTION
+  Most tools (MS-DIAL, XCMS, MZmine) use either MS1-driven or MS2-driven detection.
+  ASFAMProcessor uses both complementary approaches to maximize coverage.
+
+4.2 NEARLY CONVOLUTION-FREE MS2 FOR ALL FEATURES
+  Due to 1 Da isolation windows, all features have MS2 with substantially
+  reduced chimericity. This enables more accurate deduplication and annotation
+  compared to wider-window DIA approaches.
+
+4.3 COMPREHENSIVE FOUR-LAYER DEDUPLICATION
+  Most tools only handle isotope deduplication. ASFAMProcessor performs:
+  - Isotope dedup (3-tier evidence: MS1 pattern, modified cosine, dual cosine+NL)
+  - Adduct dedup (neutral mass matching + EIC correlation validation)
+  - Spectral duplicate detection (cosine-based, RT + m/z + cosine thresholds)
+  - ISF detection (MassCube dual criteria: precursor-fragment + EIC correlation)
+  This produces a much cleaner feature list than existing approaches.
+
+4.4 MULTIPLE m/z INFERENCE STRATEGIES
+  For features without MS1 signal, two complementary approaches:
+  - Spectral library matching (composite similarity)
+  - Neutral loss consensus (26 common neutral losses, cluster-and-vote)
+  These are chemically grounded and interpretable, unlike deep learning approaches.
+
+4.5 STANDALONE OPEN-SOURCE PIPELINE
+  Does not depend on MS-DIAL or other third-party software.
+  Complete from raw mzML to annotated feature tables.
+  Provides both GUI and CLI interfaces.
+
+
+================================================================================
+PART 5: CONFIGURATION PARAMETERS (DEFAULT VALUES)
+================================================================================
+
+General:
+  ionization_mode = "positive"
+  n_workers = 4
+
+Stage 1 (MS2 Detection):
+  eic_mz_tolerance = 0.02 Da
+  eic_smoothing_window = 7
+  eic_smoothing_polyorder = 3
+  peak_height_threshold = 200.0
+  peak_sn_threshold = 5.0
+  peak_width_min = 3 scans
+  peak_prominence = 100.0
+  peak_gaussian_threshold = 0.6
+  rt_cluster_tolerance = 0.02 min
+  min_fragments_per_feature = 2
+
+Ion Recall (Second Pass):
+  recall_enabled = True
+  recall_min_intensity = 50.0
+  recall_min_consecutive = 2
+  recall_apex_window = 2 cycles
+
+Stage 2 (MS1 Assignment):
+  ms1_mz_tolerance = 0.01 Da
+  ms1_rt_tolerance = 0.05 min
+  ms1_min_height = 100.0
+  ms1_isotope_mz_tol = 0.01 Da
+  ms1_shape_weight = 0.3
+
+Stage 2.5 (Inference):
+  min_fragments_for_inference = 3
+  matchms_similarity_threshold = 0.8
+  matchms_min_matched_peaks = 3
+  matchms_min_matched_pct = 0.25
+
+Stage 3 (Merge):
+  merge_rt_tolerance = 0.05 min
+  merge_mz_tolerance = 0.02 Da
+  merge_ms2_cosine_threshold = 0.8
+
+Stage 4 (Isotope Dedup):
+  isotope_rt_tolerance = 0.1 min
+  isotope_apex_rt_strict = 0.05 min
+  isotope_overlap_ratio = 0.80
+  isotope_mz_tolerance = 0.01 Da
+  isotope_integer_step_tolerance = 0.02 Da
+  isotope_modified_cos_threshold = 0.85
+  isotope_modified_cos_relaxed = 0.90
+  isotope_min_matches = 3
+  isotope_min_matches_relaxed = 4
+  isotope_nl_cos_threshold = 0.85
+  isotope_min_nl_matches = 3
+  isotope_max_step = 4
+
+Stage 5 (Adduct Dedup):
+  adduct_rt_tolerance = 0.05 min
+  adduct_mw_tolerance = 0.02 Da
+  adduct_eic_pearson_threshold = 0.9
+
+Stage 5b (Spectral Duplicate Detection):
+  duplicate_rt_tolerance = 0.2 min
+  duplicate_mz_tolerance = 0.5 Da
+  duplicate_cosine_threshold = 0.85
+  duplicate_min_matched = 3
+
+Stage 6 (ISF Detection):
+  isf_eic_pearson_threshold = 0.9
+  isf_min_correlated_scans = 10
+  isf_ms2_mz_tolerance = 0.02 Da
+
+Stage 7 (Alignment):
+  alignment_rt_tolerance = 0.1 min
+  alignment_mz_tolerance = 0.02 Da
+  alignment_mz_weight = 0.5
+  alignment_rt_weight = 0.5
+  gap_fill_enabled = True
+
+Quality Filters:
+  final_height_threshold = 1000.0
+  final_sn_threshold = 5.0
+  msms_intensity_threshold = 1000.0
+  msms_relative_threshold = 0.01
+  msms_min_ions = 1
+
+
+================================================================================
+PART 6: SOFTWARE ARCHITECTURE
+================================================================================
+
+Project structure:
+  asfam/
+    __init__.py          (version: 0.3.260411)
+    cli.py               (command-line interface)
+    config.py            (ProcessingConfig dataclass, 60+ parameters)
+    constants.py         (physical constants, adduct rules, isotope definitions)
+    models.py            (ScanCycle, RawSegmentData, CandidateFeature, Feature)
+    core/
+      eic.py             (EIC extraction, vectorized numpy binning)
+      peak_detection.py  (peak finding, S/N, gaussian similarity)
+      smoothing.py       (Savitzky-Golay filter)
+      similarity.py      (cosine, modified cosine, NL cosine, EIC correlation)
+      clustering.py      (RT clustering, graph connected components)
+      mass_utils.py      (isotope classification, adduct neutral mass)
+    pipeline/
+      orchestrator.py    (stage sequencing, progress callbacks)
+      stage0_load.py     (mzML parsing)
+      stage1_ms2_detection.py
+      stage1b_ms1_detection.py
+      stage2_ms1_assignment.py
+      stage2b_inference.py
+      stage3_merge_segments.py
+      stage4_isotope_dedup.py
+      stage5_adduct_dedup.py
+      stage5b_duplicate_detection.py
+      stage6_isf_detection.py
+      stage6b_annotation.py
+      stage7_alignment.py
+      stage8_export.py
+    io/
+      mzml_reader.py     (pymzml-based parser)
+      spectral_library.py (MSP/MGF reader)
+      result_export.py   (CSV/MGF/MSP writer)
+      project_file.py    (.asfam project save/load)
+    gui/
+      app.py             (entry point)
+      main_window.py     (toolbar, layout, view modes)
+      setup_panel.py     (file management, parameters)
+      progress_panel.py  (progress bar, log)
+      feature_table.py   (sortable feature table)
+      eic_plot.py        (chromatogram visualization)
+      ms2_plot.py        (fragmentation spectrum)
+      scatter_plot.py    (m/z vs RT overview)
+      worker.py          (QThread pipeline execution)
+      i18n.py            (internationalization)
+
+Dependencies:
+  pymzml>=2.5.0, numpy>=1.21, scipy>=1.7, pandas>=1.3,
+  matchms>=0.18, msbuddy>=0.2, matplotlib>=3.5, PyQt5>=5.15, lxml>=4.6
+
+License: BSD 3-Clause with Non-Commercial Clause
+Repository: https://github.com/yuanhonglun/WT_2.0
+
+================================================================================
+END OF DOCUMENT
+================================================================================

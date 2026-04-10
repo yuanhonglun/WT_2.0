@@ -22,17 +22,24 @@ class ProcessingConfig:
     eic_smoothing_polyorder: int = 3
     peak_height_threshold: float = 200.0
     peak_sn_threshold: float = 5.0
-    peak_width_min: int = 5            # minimum peak width in scans
+    peak_width_min: int = 3            # minimum peak width in scans
     peak_prominence: float = 100.0
     peak_gaussian_threshold: float = 0.6  # minimum gaussian similarity (0 = off)
     rt_cluster_tolerance: float = 0.02  # min, for grouping co-eluting ions
     min_fragments_per_feature: int = 2
 
+    # -- Stage 1: MS2 ion recall (second pass) --
+    recall_enabled: bool = True
+    recall_min_intensity: float = 50.0   # minimum raw intensity at apex for recalled ion
+    recall_min_consecutive: int = 2      # minimum consecutive nonzero cycles around apex
+    recall_apex_window: int = 2          # +/- cycles around consensus apex to search
+
     # -- Stage 2: MS1 assignment --
     ms1_mz_tolerance: float = 0.01     # Da
-    ms1_rt_tolerance: float = 0.1      # min (6s, covers typical 1-4 cycle offsets)
+    ms1_rt_tolerance: float = 0.05      # min (3s, tighter to prevent cross-assignment)
     ms1_min_height: float = 100.0
     ms1_isotope_mz_tol: float = 0.01   # Da, for isotope pattern extraction
+    ms1_shape_weight: float = 0.3      # weight for peak shape in MS1 assignment scoring
 
     # -- Stage 2.5: MS2-only m/z inference --
     min_fragments_for_inference: int = 3
@@ -48,6 +55,7 @@ class ProcessingConfig:
 
     # -- Stage 4: Isotope deduplication --
     isotope_rt_tolerance: float = 0.1           # min (search window; overlap ratio is primary criterion)
+    isotope_apex_rt_strict: float = 0.05        # min, hard max for apex RT difference between isotope pairs
     isotope_overlap_ratio: float = 0.80
     isotope_mz_tolerance: float = 0.01          # Da, classic gaps
     isotope_integer_step_tolerance: float = 0.02  # Da, relaxed gaps
@@ -96,7 +104,7 @@ class ProcessingConfig:
     final_sn_threshold: float = 5.0
     final_gaussian_threshold: float = 0.6
     msms_intensity_threshold: float = 1000.0
-    msms_relative_threshold: float = 0.05
+    msms_relative_threshold: float = 0.01
     msms_min_ions: int = 1
 
     # -----------------------------------------------------------------------
