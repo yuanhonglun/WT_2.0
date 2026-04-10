@@ -6,6 +6,8 @@ dist/
 build/
 build_final/
 dist_final/
+build_release/
+dist_release/
 .eggs/
 *.spec.bak
 .vscode/
