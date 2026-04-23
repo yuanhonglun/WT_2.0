@@ -125,7 +125,7 @@ class PipelineOrchestrator:
         # Pre-load library once, share between stage 2.5 and 6.5
         self._emit("stage2b", 0, 1, "Loading library...")
         loaded_library = None
-        if spectral_library_path:
+        if spectral_library_path and getattr(self.config, "enable_library_mz_inference", False):
             from asfam.pipeline.stage2b_inference import _load_library
             loaded_library = _load_library(spectral_library_path)
         t0 = time.time()
@@ -157,6 +157,7 @@ class PipelineOrchestrator:
         t0 = time.time()
         features_by_rep = run_stage4(
             features_by_rep, self.config, self._emit,
+            data_by_replicate=data_by_replicate,
         )
         total_iso = sum(len(f) for f in features_by_rep.values())
         self.stage_stats["Stage 4: Isotope Dedup"] = {
@@ -183,7 +184,8 @@ class PipelineOrchestrator:
         self._check_cancel()
         self._emit("stage5b", 0, 1, "Duplicate detection...")
         t0 = time.time()
-        features_by_rep = run_stage5b(features_by_rep, self.config, self._emit)
+        features_by_rep = run_stage5b(features_by_rep, self.config, self._emit,
+                                       data_by_replicate=data_by_replicate)
         n_dups = sum(
             sum(1 for f in feats if f.is_duplicate)
             for feats in features_by_rep.values()

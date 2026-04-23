@@ -134,8 +134,8 @@ def _process_segment_ms1(
             )
 
             n_frags = len(ms2_mz)
-            # Require at least 1 fragment (MS1-driven can have fewer frags)
-            if n_frags < 1:
+            # MS1-driven features must also meet the global minimum fragment count
+            if n_frags < config.min_fragments_per_feature:
                 continue
 
             feature_id = f"{raw_data.segment_name}_{channel}_ms1_{feature_counter}"

@@ -5,11 +5,13 @@ import logging
 from typing import Optional, Callable
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from asfam.config import ProcessingConfig
 from asfam.models import RawSegmentData, CandidateFeature, Feature
 from asfam.core.eic import extract_ms1_eic, extract_product_ion_eics
 from asfam.core.peak_detection import detect_peaks
+from asfam.core.similarity import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +25,9 @@ def run_stage7(
     """Align features across biological replicates.
 
     Uses the replicate with the most features as reference.
-    Matches features by Gaussian similarity (m/z + RT).
-    Gap-fills missing values from raw data.
+    Matches features using the Hungarian algorithm (globally optimal
+    assignment) with combined scoring: Gaussian similarity on m/z + RT,
+    plus MS2 spectral cosine similarity for disambiguation.
     """
     logger.info("Stage 7: Cross-replicate alignment...")
 
@@ -45,25 +48,55 @@ def run_stage7(
             "matches": {ref_id: feat},
         })
 
-    # Match other replicates to reference
+    # Precompute reference MS2 peak lists for cosine scoring
+    ref_peaks_list = []
+    for aln in aligned:
+        feat = aln["ref_feature"]
+        if feat.ms2_mz is not None and len(feat.ms2_mz) > 0:
+            ref_peaks_list.append(list(zip(feat.ms2_mz.tolist(), feat.ms2_intensity.tolist())))
+        else:
+            ref_peaks_list.append([])
+
+    ms2_tol = config.eic_mz_tolerance  # Da, same tolerance used for MS2 matching
+
+    # Match other replicates to reference using Hungarian algorithm
     for rep_id in rep_ids:
         if rep_id == ref_id:
             continue
 
         target_features = features_by_replicate[rep_id]
-        used_targets: set[int] = set()
+        n_ref = len(aligned)
+        n_target = len(target_features)
 
-        for aln in aligned:
+        if n_target == 0:
+            continue
+
+        # Precompute target MS2 peak lists
+        target_peaks_list = []
+        for t_feat in target_features:
+            if t_feat.ms2_mz is not None and len(t_feat.ms2_mz) > 0:
+                target_peaks_list.append(list(zip(t_feat.ms2_mz.tolist(), t_feat.ms2_intensity.tolist())))
+            else:
+                target_peaks_list.append([])
+
+        # Build similarity matrix with combined scoring
+        sim_matrix = np.zeros((n_ref, n_target))
+        for i, aln in enumerate(aligned):
             ref_feat = aln["ref_feature"]
-            best_score = 0.0
-            best_idx = -1
+            ref_mz = ref_feat.precursor_mz
+            ref_rt = ref_feat.rt_apex
+            ref_peaks = ref_peaks_list[i]
 
-            for t_idx, t_feat in enumerate(target_features):
-                if t_idx in used_targets:
+            for j, t_feat in enumerate(target_features):
+                # Quick filter: skip obviously distant pairs
+                if abs(ref_mz - t_feat.precursor_mz) > config.alignment_mz_tolerance * 3:
+                    continue
+                if abs(ref_rt - t_feat.rt_apex) > config.alignment_rt_tolerance * 3:
                     continue
 
-                score = _gaussian_similarity(
-                    ref_feat.precursor_mz, ref_feat.rt_apex,
+                # Gaussian m/z + RT score (0-1)
+                gauss = _gaussian_similarity(
+                    ref_mz, ref_rt,
                     t_feat.precursor_mz, t_feat.rt_apex,
                     config.alignment_mz_tolerance,
                     config.alignment_rt_tolerance,
@@ -71,13 +104,29 @@ def run_stage7(
                     config.alignment_rt_weight,
                 )
 
-                if score > best_score:
-                    best_score = score
-                    best_idx = t_idx
+                # MS2 cosine similarity (0-1)
+                ms2_cos = 0.0
+                if ref_peaks and target_peaks_list[j]:
+                    ms2_cos, _ = cosine_similarity(ref_peaks, target_peaks_list[j], ms2_tol)
 
-            if best_idx >= 0 and best_score > 0.5:
-                aln["matches"][rep_id] = target_features[best_idx]
-                used_targets.add(best_idx)
+                # Combined score: 60% m/z+RT, 40% MS2
+                # When MS2 is unavailable (either side has 0 fragments),
+                # fall back to pure m/z+RT scoring
+                if ref_peaks and target_peaks_list[j]:
+                    sim_matrix[i, j] = 0.6 * gauss + 0.4 * ms2_cos
+                else:
+                    sim_matrix[i, j] = gauss
+
+        # Hungarian algorithm: minimize cost = maximize similarity
+        cost_matrix = -sim_matrix
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        for r, c in zip(row_ind, col_ind):
+            if sim_matrix[r, c] > 0.5:
+                aligned[r]["matches"][rep_id] = target_features[c]
+
+        n_matched = sum(1 for r, c in zip(row_ind, col_ind) if sim_matrix[r, c] > 0.5)
+        logger.info("  Replicate %s: %d/%d features matched", rep_id, n_matched, n_target)
 
     # Convert to Feature objects
     result: list[Feature] = []

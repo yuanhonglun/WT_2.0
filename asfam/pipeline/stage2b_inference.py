@@ -42,8 +42,12 @@ def run_stage2b(
     logger.info("Stage 2.5: MS2-only m/z inference...")
 
     library = preloaded_library
-    if library is None and spectral_library_path:
+    if (library is None and spectral_library_path
+            and getattr(config, "enable_library_mz_inference", False)):
         library = _load_library(spectral_library_path)
+    elif not getattr(config, "enable_library_mz_inference", False):
+        # Library-matching inference disabled by config — skip library step entirely.
+        library = None
 
     for rep_id, features in features_by_replicate.items():
         ms2_only = [f for f in features if f.signal_type == "ms2_only"

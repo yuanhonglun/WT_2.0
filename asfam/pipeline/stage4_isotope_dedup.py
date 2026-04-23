@@ -4,28 +4,85 @@ from __future__ import annotations
 import logging
 from typing import Optional, Callable
 
+import numpy as np
+
 from asfam.config import ProcessingConfig
-from asfam.models import CandidateFeature
+from asfam.models import CandidateFeature, RawSegmentData
 from asfam.core.mass_utils import (
     classify_isotope_gap, peak_overlap_ratio, max_c13_m1_ratio,
 )
-from asfam.core.similarity import modified_cosine, neutral_loss_cosine
+from asfam.constants import C13_DELTA, ISOTOPE_DELTAS
+from asfam.core.similarity import (
+    modified_cosine, neutral_loss_cosine, greedy_match,
+    ms2_isotope_step_score,
+)
 from asfam.core.clustering import connected_components, select_representative
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_apex_rt_strict(
+    config: ProcessingConfig,
+    data_by_replicate: Optional[dict] = None,
+) -> float:
+    """Compute the hard apex-RT gate from the data's actual scan cycle time.
+
+    isotope_apex_rt_n_cycles cycles * median(cycle_time). Falls back to
+    isotope_apex_rt_fallback if cycle time cannot be determined.
+    """
+    n_cycles = max(1, int(getattr(config, "isotope_apex_rt_n_cycles", 2)))
+    fallback = float(getattr(config, "isotope_apex_rt_fallback", 0.04))
+    if not data_by_replicate:
+        return fallback
+    cycle_times: list[float] = []
+    for segments in data_by_replicate.values():
+        for raw in segments:
+            try:
+                rt = np.asarray(raw.rt_array, dtype=np.float64)
+                if rt.size >= 2:
+                    diffs = np.diff(rt)
+                    diffs = diffs[diffs > 0]
+                    if diffs.size:
+                        cycle_times.append(float(np.median(diffs)))
+            except Exception:
+                continue
+    if not cycle_times:
+        return fallback
+    cycle_time = float(np.median(cycle_times))
+    return n_cycles * cycle_time
 
 
 def run_stage4(
     features_by_replicate: dict[str, list[CandidateFeature]],
     config: ProcessingConfig,
     progress_callback: Optional[Callable] = None,
+    data_by_replicate: Optional[dict] = None,
 ) -> dict[str, list[CandidateFeature]]:
     """Isotope deduplication for each replicate.
 
     Builds an isotope graph, finds connected components, keeps
     the representative (lowest m/z, highest intensity) from each group.
+
+    Evidence tiers (in order of trust):
+      Tier 0  — MS2 step-pattern: of the lighter feature's top-N high-response
+                ions, at least `isotope_step_min_ratio` have a +isotope_delta
+                ion in the heavier feature's MS2. Strongest signal for true
+                isotope partners; survives intensity differences that defeat
+                cosine.
+      Tier 1  — MS1 isotope pattern explicitly links the two precursors.
+      Tier 2  — Modified cosine (classic gaps): >= threshold + min matches
+                + intensity-ratio plausibility.
+      Tier 3  — Relaxed near-integer gap: requires step-pattern OR strict
+                modified+NL cosine.
+
+    All tiers also require apex RT within ~2 scan cycles (computed from the
+    data's actual cycle time, see _resolve_apex_rt_strict).
     """
-    logger.info("Stage 4: Isotope deduplication...")
+    apex_rt_strict = _resolve_apex_rt_strict(config, data_by_replicate)
+    logger.info(
+        "Stage 4: Isotope deduplication (apex_rt_strict=%.4f min)...",
+        apex_rt_strict,
+    )
 
     for rep_id, features in features_by_replicate.items():
         active = [f for f in features if f.status == "active"]
@@ -49,7 +106,8 @@ def run_stage4(
                     break
 
                 # Strict apex RT gate: isotopes must have very close apex RTs
-                if rt_diff > config.isotope_apex_rt_strict:
+                # (within ~2 scan cycles, see _resolve_apex_rt_strict).
+                if rt_diff > apex_rt_strict:
                     continue
 
                 # Peak overlap check
@@ -70,48 +128,58 @@ def run_stage4(
                 if gap_type is None:
                     continue
 
-                # MS1 isotope support check
-                if _has_ms1_isotope_support(fi, fj, config.isotope_mz_tolerance,
-                                            rt_tolerance=config.isotope_apex_rt_strict):
+                # Identify lighter / heavier feature for step-pattern check
+                if fi.precursor_mz <= fj.precursor_mz:
+                    f_light, f_heavy = fi, fj
+                else:
+                    f_light, f_heavy = fj, fi
+                peaks_light = f_light.ms2_as_list()
+                peaks_heavy = f_heavy.ms2_as_list()
+                # Effective isotope delta to test in MS2 echo: snap to the
+                # nearest known isotope step (default C13 = 1.003355).
+                eff_delta = _nearest_isotope_step(delta_mz)
+
+                # Tier 0 (primary): MS2 step-pattern echo of the lighter
+                # spectrum into the heavier spectrum at the isotope delta.
+                step_match, step_total = ms2_isotope_step_score(
+                    peaks_light, peaks_heavy,
+                    isotope_delta=eff_delta,
+                    mz_tolerance=config.isotope_step_mz_tolerance,
+                    top_n=config.isotope_step_top_n,
+                )
+                step_ratio = step_match / step_total if step_total > 0 else 0.0
+                if (step_total >= 2
+                        and step_match >= 2
+                        and step_ratio >= config.isotope_step_min_ratio
+                        and _intensity_ratio_ok(fi, fj, delta_mz)):
                     adjacency[i].add(j)
                     adjacency[j].add(i)
                     n_edges += 1
                     continue
 
-                # MS2 spectral similarity check
-                peaks_i = fi.ms2_as_list()
-                peaks_j = fj.ms2_as_list()
-                prec_i = fi.precursor_mz
-                prec_j = fj.precursor_mz
+                # Tier 1: MS1 isotope pattern explicitly links the precursors
+                if _has_ms1_isotope_support(fi, fj, config.isotope_mz_tolerance,
+                                            rt_tolerance=apex_rt_strict):
+                    adjacency[i].add(j)
+                    adjacency[j].add(i)
+                    n_edges += 1
+                    continue
 
+                # Tier 2 — modified cosine fallback (classic gaps only).
+                # Step-pattern is the primary detector; cosine here is a
+                # safety net for spectra where the heavy-atom-bearing
+                # fragments are not in the top-N of the lighter spectrum.
                 if gap_type == "classic":
+                    prec_i = fi.precursor_mz
+                    prec_j = fj.precursor_mz
                     cos, n_matched = modified_cosine(
-                        peaks_i, peaks_j, prec_i, prec_j,
+                        peaks_light, peaks_heavy, f_light.precursor_mz, f_heavy.precursor_mz,
                         config.isotope_fragment_mz_tolerance,
                         config.isotope_precursor_exclusion,
                     )
-                    if cos >= config.isotope_modified_cos_threshold and \
-                       n_matched >= config.isotope_min_matches:
-                        # Intensity ratio check for C13
-                        if _intensity_ratio_ok(fi, fj, delta_mz):
-                            adjacency[i].add(j)
-                            adjacency[j].add(i)
-                            n_edges += 1
-
-                elif gap_type == "relaxed":
-                    cos, n_matched = modified_cosine(
-                        peaks_i, peaks_j, prec_i, prec_j,
-                        config.isotope_fragment_mz_tolerance,
-                        config.isotope_precursor_exclusion,
-                    )
-                    nl_cos, nl_matched = neutral_loss_cosine(
-                        peaks_i, peaks_j, prec_i, prec_j,
-                        config.isotope_fragment_mz_tolerance,
-                    )
-                    if (cos >= config.isotope_modified_cos_relaxed and
-                            n_matched >= config.isotope_min_matches_relaxed and
-                            nl_cos >= config.isotope_nl_cos_threshold and
-                            nl_matched >= config.isotope_min_nl_matches):
+                    if (cos >= config.isotope_modified_cos_threshold
+                            and n_matched >= config.isotope_min_matches
+                            and _intensity_ratio_ok(fi, fj, delta_mz)):
                         adjacency[i].add(j)
                         adjacency[j].add(i)
                         n_edges += 1
@@ -124,7 +192,7 @@ def run_stage4(
         # range.  Sort each component by RT and break at any gap larger than
         # the strict apex tolerance — this cleanly separates RT-distant
         # features into independent sub-groups.
-        max_rt_gap = config.isotope_apex_rt_strict
+        max_rt_gap = apex_rt_strict
         components = []
         for comp in raw_components:
             if len(comp) <= 1:
@@ -176,6 +244,31 @@ def run_stage4(
             progress_callback("stage4", 1, 1, f"Rep {rep_id} done")
 
     return features_by_replicate
+
+
+def _nearest_isotope_step(delta_mz: float) -> float:
+    """Snap an observed Δmz to the nearest known isotope step.
+
+    Uses ISOTOPE_DELTAS (C13/N15/S34/...) and integer multiples of C13_DELTA
+    up to step 4. Falls back to round(delta_mz) * C13_DELTA for unrecognised
+    near-integer gaps so the step-pattern check still has a sensible target.
+    """
+    abs_d = abs(delta_mz)
+    candidates: list[float] = []
+    for name, d in ISOTOPE_DELTAS.items():
+        if name == "C13":
+            for n in range(1, 5):
+                candidates.append(n * d)
+        else:
+            candidates.append(d)
+    # Pick the nearest known step
+    if candidates:
+        best = min(candidates, key=lambda c: abs(c - abs_d))
+        if abs(best - abs_d) <= 0.05:  # within 50 mDa is "the same step"
+            return best
+    # Fallback for unrecognised near-integer gaps
+    n_round = max(1, int(round(abs_d)))
+    return n_round * C13_DELTA
 
 
 def _has_ms1_isotope_support(

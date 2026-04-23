@@ -16,6 +16,7 @@ from PyQt5.QtGui import QIcon, QColor, QPalette
 
 from asfam.config import ProcessingConfig
 from asfam.models import Feature
+from asfam import __version__
 
 from asfam.gui.setup_panel import SetupPanel
 from asfam.gui.scatter_plot import ScatterPlotWidget
@@ -150,7 +151,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ASFAMProcessor v0.3.260411")
+        self.setWindowTitle(f"ASFAMProcessor v{__version__}")
         self.resize(1400, 900)
 
         # Set icon

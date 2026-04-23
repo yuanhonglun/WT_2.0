@@ -110,14 +110,40 @@ def _process_one_file(
             continue
 
         # Cluster peaks by RT
-        clusters = cluster_peaks_by_rt(all_peaks, config.rt_cluster_tolerance)
+        clusters = cluster_peaks_by_rt(
+            all_peaks,
+            config.rt_cluster_tolerance,
+            config.cluster_max_apex_span,
+        )
+
+        # One-peak-one-feature ownership resolution.
+        # A single chromatographic peak in a given product-ion EIC can only
+        # belong to the cluster whose intensity-weighted consensus RT is
+        # nearest to that peak's apex. This prevents a low-response feature
+        # from absorbing ions that really belong to a neighbouring
+        # high-response feature (e.g. a shared base peak).
+        clusters = _resolve_peak_ownership(clusters)
+
+        # Drop clusters that no longer carry enough genuine peaks
+        clusters = [c for c in clusters if len(c) >= 1]
 
         # Second pass: recall co-eluting ions with relaxed criteria
         recalled_by_idx: dict[int, list[tuple[float, float, float]]] = {}
-        if config.recall_enabled:
+        if config.recall_enabled and clusters:
+            # Precompute consensus RT per cluster for ownership-aware recall
+            all_consensus_rts: list[float] = []
+            for cl in clusters:
+                if not cl:
+                    all_consensus_rts.append(float("nan"))
+                    continue
+                rts_c = np.array([p.rt_apex for p in cl], dtype=np.float64)
+                hs_c = np.array([max(p.height, 1e-6) for p in cl], dtype=np.float64)
+                all_consensus_rts.append(float(np.average(rts_c, weights=hs_c)))
             for ci, cluster in enumerate(clusters):
                 recalled_by_idx[ci] = _recall_ions_for_cluster(
                     cluster, all_eics, precursor, config,
+                    cluster_index=ci,
+                    all_consensus_rts=all_consensus_rts,
                 )
 
         # Assemble features from clusters
@@ -214,17 +240,81 @@ def _process_one_file(
     return features
 
 
+def _resolve_peak_ownership(
+    clusters: list[list],
+) -> list[list]:
+    """Assign each detected peak to exactly one cluster.
+
+    For every (product_mz_bin, apex_index) peak present across all clusters,
+    keep it only in the cluster whose intensity-weighted consensus RT is
+    closest to the peak's own apex RT. Ties are broken by the larger cluster,
+    then by higher peak height.
+
+    This fixes the case where a high-response feature shares a strong ion
+    (e.g. base peak 85) with a neighbouring low-response feature whose own
+    cluster would otherwise "steal" that ion even though the real peak
+    apex is far away from the low-response consensus RT.
+    """
+    if not clusters:
+        return clusters
+
+    # Consensus RT per cluster (intensity-weighted mean of apex RTs)
+    consensus_rts: list[float] = []
+    cluster_sizes: list[int] = []
+    for cluster in clusters:
+        if not cluster:
+            consensus_rts.append(0.0)
+            cluster_sizes.append(0)
+            continue
+        rts = np.array([p.rt_apex for p in cluster], dtype=np.float64)
+        heights = np.array([max(p.height, 1e-6) for p in cluster], dtype=np.float64)
+        consensus_rts.append(float(np.average(rts, weights=heights)))
+        cluster_sizes.append(len(cluster))
+
+    # Choose owner for every (product_mz_bin, apex_index) key
+    peak_owner: dict[tuple[int, int], int] = {}
+    peak_pick: dict[tuple[int, int], tuple[float, int, float]] = {}
+    # Stored score = (distance_to_consensus, -cluster_size, -peak_height)
+    # smaller score wins (tie-break: larger cluster, taller peak)
+
+    for ci, cluster in enumerate(clusters):
+        cons_rt = consensus_rts[ci]
+        size = cluster_sizes[ci]
+        for p in cluster:
+            key = (round(p.product_mz * 200), int(p.apex_index))
+            score = (abs(cons_rt - p.rt_apex), -size, -float(p.height))
+            best = peak_pick.get(key)
+            if best is None or score < best:
+                peak_pick[key] = score
+                peak_owner[key] = ci
+
+    # Rebuild clusters keeping only peaks owned by this cluster index
+    new_clusters: list[list] = [[] for _ in clusters]
+    for ci, cluster in enumerate(clusters):
+        for p in cluster:
+            key = (round(p.product_mz * 200), int(p.apex_index))
+            if peak_owner.get(key) == ci:
+                new_clusters[ci].append(p)
+    return new_clusters
+
+
 def _recall_ions_for_cluster(
     cluster: list,
     all_eics: list,
     precursor_mz_nominal: int,
     config: ProcessingConfig,
+    cluster_index: int = 0,
+    all_consensus_rts: list | None = None,
 ) -> list[tuple[float, float, float]]:
     """Recall additional co-eluting ions at the cluster's consensus RT.
 
     For each EIC not already represented in the cluster, checks for signal
     in a small window around the cluster's apex. Ions that show co-elution
     evidence (sufficient intensity and consecutive nonzero scans) are recalled.
+
+    Ownership-aware: if another cluster's consensus RT is closer to the
+    window's own local maximum than this cluster's consensus RT, the ion
+    is left to that other cluster instead.
 
     Returns list of (product_mz, intensity, sn_estimate).
     """
@@ -281,6 +371,23 @@ def _recall_ions_for_cluster(
                 consec = 0
         if max_consec < config.recall_min_consecutive:
             continue
+
+        # Ownership guard: if another cluster's consensus RT is closer to
+        # the local maximum of this EIC within the recall window, skip —
+        # that peak belongs to the other cluster.
+        if all_consensus_rts is not None and len(all_consensus_rts) > 1:
+            local_argmax = int(np.argmax(segment)) + idx_lo
+            local_rt = float(rt_array[local_argmax])
+            my_dist = abs(consensus_rt - local_rt)
+            stolen = False
+            for oi, other_rt in enumerate(all_consensus_rts):
+                if oi == cluster_index or not np.isfinite(other_rt):
+                    continue
+                if abs(other_rt - local_rt) < my_dist - 1e-9:
+                    stolen = True
+                    break
+            if stolen:
+                continue
 
         # Estimate S/N
         n = len(eic.intensity_array)

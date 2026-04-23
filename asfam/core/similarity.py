@@ -9,6 +9,52 @@ from scipy.stats import pearsonr
 
 
 # ---------------------------------------------------------------------------
+# MS2 isotope step-pattern evidence
+# ---------------------------------------------------------------------------
+
+def ms2_isotope_step_score(
+    peaks_lighter: list[tuple[float, float]],
+    peaks_heavier: list[tuple[float, float]],
+    isotope_delta: float = 1.003355,
+    mz_tolerance: float = 0.01,
+    top_n: int = 6,
+) -> tuple[int, int]:
+    """Count how many of the lighter feature's top-N high-response ions
+    have a corresponding +isotope_delta ion in the heavier feature's MS2.
+
+    True isotope pairs (M and M+1) typically share the property that the
+    heavier feature's MS2 "echoes" the lighter feature's MS2 with each
+    fragment shifted by +isotope_delta (when the fragment retains the
+    heavy atom). This is independent of cosine similarity — it survives
+    even when relative intensities differ.
+
+    Parameters
+    ----------
+    peaks_lighter, peaks_heavier : list of (mz, intensity)
+    isotope_delta : Da, e.g. 1.003355 for C13
+    mz_tolerance : Da, ±tol around target m/z
+    top_n : take the top N most intense ions of the lighter spectrum
+
+    Returns
+    -------
+    (matched_count, considered_count)
+    """
+    if not peaks_lighter or not peaks_heavier:
+        return 0, 0
+
+    # Top N most intense ions of the lighter spectrum
+    sorted_l = sorted(peaks_lighter, key=lambda x: -x[1])[:top_n]
+    heavy_mz = np.asarray([m for m, _ in peaks_heavier], dtype=np.float64)
+
+    matched = 0
+    for mz_l, _ in sorted_l:
+        target = mz_l + isotope_delta
+        if heavy_mz.size and float(np.min(np.abs(heavy_mz - target))) <= mz_tolerance:
+            matched += 1
+    return matched, len(sorted_l)
+
+
+# ---------------------------------------------------------------------------
 # Greedy peak matching (adapted from user's existing script)
 # ---------------------------------------------------------------------------
 

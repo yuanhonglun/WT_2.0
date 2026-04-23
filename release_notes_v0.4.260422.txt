@@ -1,0 +1,42 @@
+ASFAMProcessor v0.4.260422
+==========================
+
+This release fixes four issues reported against the 0.3.260420 line.
+
+1. Overly permissive MS2 ion clustering (F00225/F00002-style)
+   - peak_height_threshold: 200 -> 500
+   - peak_gaussian_threshold: 0.60 -> 0.75
+   - recall_min_intensity: 50 -> 200
+   - recall_min_consecutive: 2 -> 4
+   - msms_relative_threshold: 0.01 -> 0.02
+   - peak_detection: added raw-apex height gate (>=60% of threshold on raw
+     intensity within +/-1 cycle) to kill Savitzky-Golay-inflated noise
+     spikes. Zero-fraction cutoff tightened from 0.25 to 0.20.
+
+2. Apex-RT inconsistency within one feature (F00279/F00402-style)
+   - New ProcessingConfig.cluster_max_apex_span (0.05 min): hard cap on the
+     span of apex RTs within a single cluster.
+   - Boundary-overlap clustering shortcut now requires apex_diff <= 2x
+     rt_cluster_tolerance AND that admitting the peak would not exceed the
+     max apex span. Same cap applied to the post-clustering merge step.
+
+3. Shared MS2 peak across neighbouring features (F00311/F00330, F00807)
+   - New _resolve_peak_ownership in Stage 1: for every (product_mz_bin,
+     apex_index) peak detected across all clusters in one HR-MRM channel,
+     keep it only in the cluster whose intensity-weighted consensus RT is
+     nearest to the peak's own apex. Tie-break by larger cluster size,
+     then by taller peak height.
+   - Recall pass is now ownership-aware: if another cluster's consensus RT
+     is closer to this EIC's local maximum within the recall window, the
+     ion is left to that other cluster.
+
+4. Missed MS2-only isotope pairs (F01052/F01105, F01044/F01103)
+   - isotope_overlap_ratio: 0.80 -> 0.70
+   - New Tier 2.5 (fragment-set Jaccard) fallback in Stage 4: for tightly
+     co-eluting MS2-only pairs (apex_diff <= 0.02 min) with a classic gap
+     where modified cosine narrowly fails, accept the edge when the
+     fragment-set Jaccard (matched / max(|A|, |B|)) >= 0.50 with
+     matched >= 3.
+   - New config knobs: isotope_ms2only_jaccard_fallback (True),
+     isotope_fragment_jaccard_threshold (0.50),
+     isotope_ms2only_apex_tight (0.02).

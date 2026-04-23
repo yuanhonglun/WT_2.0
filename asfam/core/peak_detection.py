@@ -65,6 +65,17 @@ def detect_peaks(
         left_idx = _find_boundary_left(smoothed, idx)
         right_idx = _find_boundary_right(smoothed, idx)
 
+        # Raw-apex height gate: Savitzky-Golay smoothing can inflate the
+        # apparent apex of short noise bursts on a zero background. Require
+        # the raw intensity within ±1 cycle of the apex to also exceed at
+        # least 60% of the height_threshold. This kills noise spikes that
+        # the smoother turned into ~apparent peaks.
+        lo_apex = max(0, idx - 1)
+        hi_apex = min(len(intensity_array), idx + 2)
+        raw_apex_max = float(intensity_array[lo_apex:hi_apex].max())
+        if raw_apex_max < height_threshold * 0.6:
+            continue
+
         # Validate against raw (unsmoothed) data:
         # The raw EIC in peak range must have consecutive nonzero points >= width_min.
         # This filters 3-point noise spikes that smoothing broadens into fake peaks.
@@ -77,7 +88,7 @@ def detect_peaks(
         # scattered nonzero points on a zero background.
         n_pts = len(raw_segment)
         n_zeros = int(np.sum(raw_segment == 0))
-        if n_pts > 0 and n_zeros / n_pts > 0.25:
+        if n_pts > 0 and n_zeros / n_pts > 0.20:
             continue
 
         area = float(np.trapz(intensity_array[left_idx:right_idx + 1],

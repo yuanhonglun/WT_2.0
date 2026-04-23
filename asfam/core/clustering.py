@@ -14,16 +14,19 @@ from asfam.models import DetectedPeak
 def cluster_peaks_by_rt(
     peaks: list[DetectedPeak],
     rt_tolerance: float = 0.02,
+    max_apex_span: float = 0.05,
 ) -> list[list[DetectedPeak]]:
     """Cluster detected peaks by retention time proximity.
 
-    Uses TWO criteria (either triggers merge):
-    1. Apex RT within rt_tolerance of cluster median (original)
-    2. Peak boundaries overlap with the cluster's RT range
+    Uses TWO criteria (either triggers merge), BOTH with a max-apex-span cap:
+    1. Apex RT within rt_tolerance of cluster median
+    2. Peak boundaries overlap AND apex RT within 2x tolerance
+       AND admitting the peak does not push the cluster's
+       (max_apex - min_apex) above max_apex_span.
 
-    After initial clustering, adjacent clusters are merged if their
-    peak ranges overlap, catching edge cases where greedy assignment
-    splits a compound due to median drift.
+    After initial clustering, adjacent clusters are merged only if their
+    median apex RTs are within 2x tolerance AND the merged apex span stays
+    within max_apex_span.
 
     Within each cluster, duplicate product m/z (within 0.005 Da)
     are deduplicated, keeping the highest-intensity peak.
@@ -39,15 +42,25 @@ def cluster_peaks_by_rt(
         cluster_rt = np.median([p.rt_apex for p in current])
         c_left = min(p.rt_left for p in current)
         c_right = max(p.rt_right for p in current)
+        c_apex_min = min(p.rt_apex for p in current)
+        c_apex_max = max(p.rt_apex for p in current)
+        new_apex_min = min(c_apex_min, peak.rt_apex)
+        new_apex_max = max(c_apex_max, peak.rt_apex)
+        new_span = new_apex_max - new_apex_min
 
         apex_diff = abs(peak.rt_apex - cluster_rt)
         within_tol = apex_diff <= rt_tolerance
-        # Only use boundary overlap if apexes are also reasonably close (< 3x tolerance).
-        # This prevents merging different compounds that merely overlap chromatographically.
+        # Boundary overlap shortcut: apex must still be within 2x tolerance
+        # AND the resulting cluster apex-span must not exceed max_apex_span.
+        # This prevents co-elution smearing from merging chromatographically
+        # distinct compounds into one feature.
         overlaps = (peak.rt_left <= c_right and peak.rt_right >= c_left
-                    and apex_diff <= rt_tolerance * 3)
+                    and apex_diff <= rt_tolerance * 2
+                    and new_span <= max_apex_span)
 
-        if within_tol or overlaps:
+        if within_tol and new_span <= max_apex_span:
+            current.append(peak)
+        elif overlaps:
             current.append(peak)
         else:
             clusters.append(current)
@@ -55,7 +68,7 @@ def cluster_peaks_by_rt(
     clusters.append(current)
 
     # Post-clustering merge: merge adjacent clusters whose peak ranges overlap
-    # AND whose median apex RTs are close enough (< 3x tolerance)
+    # AND whose median apex RTs are close AND the merged apex span is bounded.
     merged = [clusters[0]]
     for cluster in clusters[1:]:
         prev = merged[-1]
@@ -63,8 +76,13 @@ def cluster_peaks_by_rt(
         cur_left = min(p.rt_left for p in cluster)
         prev_median = np.median([p.rt_apex for p in prev])
         cur_median = np.median([p.rt_apex for p in cluster])
+        combined_apex_min = min(p.rt_apex for p in prev + cluster)
+        combined_apex_max = max(p.rt_apex for p in prev + cluster)
+        combined_span = combined_apex_max - combined_apex_min
 
-        if cur_left <= prev_right and abs(cur_median - prev_median) <= rt_tolerance * 3:
+        if (cur_left <= prev_right
+                and abs(cur_median - prev_median) <= rt_tolerance * 2
+                and combined_span <= max_apex_span):
             merged[-1] = prev + cluster
         else:
             merged.append(cluster)

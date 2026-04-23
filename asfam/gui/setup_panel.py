@@ -150,6 +150,7 @@ class SetupPanel(QWidget):
         self.config.peak_gaussian_threshold = self.spin_gauss_thr.value()
         self.config.ms1_min_height = self.spin_ms1_height.value()
         self.config.min_fragments_for_inference = self.spin_infer_frags.value()
+        self.config.enable_library_mz_inference = self.chk_enable_library_infer.isChecked()
         self.config.matchms_similarity_threshold = self.spin_matchms_thr.value()
         self.config.matchms_use_rt = self.chk_use_rt.isChecked()
         # Dedup
@@ -222,6 +223,14 @@ class SetupPanel(QWidget):
         self.spin_infer_frags.setRange(1, 20)
         self.spin_infer_frags.setValue(self.config.min_fragments_for_inference)
         form.addRow("Infer Min Frags:", self.spin_infer_frags)
+
+        self.chk_enable_library_infer = QCheckBox(
+            "Enable library m/z inference (slow; few features benefit)"
+        )
+        self.chk_enable_library_infer.setChecked(
+            getattr(self.config, "enable_library_mz_inference", False)
+        )
+        form.addRow("Library m/z Inference:", self.chk_enable_library_infer)
 
         self.spin_matchms_thr = _dbl_spin(self.config.matchms_similarity_threshold, 0, 1, 0.05, 2)
         form.addRow("Library Match Thr:", self.spin_matchms_thr)
@@ -369,6 +378,9 @@ class SetupPanel(QWidget):
         self.spin_min_frags.setValue(self.config.min_fragments_per_feature)
         self.spin_ms1_height.setValue(self.config.ms1_min_height)
         self.spin_infer_frags.setValue(self.config.min_fragments_for_inference)
+        self.chk_enable_library_infer.setChecked(
+            getattr(self.config, "enable_library_mz_inference", False)
+        )
         self.spin_matchms_thr.setValue(self.config.matchms_similarity_threshold)
         self.spin_iso_cos.setValue(self.config.isotope_modified_cos_threshold)
         self.spin_add_corr.setValue(self.config.adduct_eic_pearson_threshold)

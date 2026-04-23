@@ -90,7 +90,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("ASFAMProcessor")
-    app.setApplicationVersion("0.3.260411")
+    from asfam import __version__
+    app.setApplicationVersion(__version__)
 
     # Set default font
     from PyQt5.QtGui import QFont

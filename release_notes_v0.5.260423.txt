@@ -1,0 +1,36 @@
+## v0.5.260423
+
+### New Features
+
+**MS2 step-pattern isotope detection (Stage 4)**
+A new primary detector for true isotope partners. For every candidate pair, the lighter feature's top-N high-response ions (default N = 6) are checked against the heavier feature's MS2: a true isotope partner "echoes" each fragment shifted by ~+1.003355 Da (when the fragment retains the heavy atom). If at least 50% of the top-N ions show this echo, the pair is flagged as isotope. This is independent of cosine similarity and survives the intensity differences that defeat the old modified-cosine check.
+New config parameters: `isotope_step_top_n`, `isotope_step_min_ratio`, `isotope_step_mz_tolerance`. Function: `asfam.core.similarity.ms2_isotope_step_score`.
+
+**Cycle-time-aware RT gates (Stages 4, 5b)**
+Apex RT gates that used fixed minute values are now derived from each dataset's actual median scan cycle time. Stage 4 isotope dedup uses `isotope_apex_rt_n_cycles` (default 2 cycles); Stage 5b duplicate detection uses `duplicate_rt_n_cycles` (default 4 cycles). On the demo data (~1.1 s cycles), this resolves to ~0.036 min and ~0.073 min respectively. Fallback values are used if cycle time cannot be determined.
+
+**Optional library m/z inference (Stage 2.5)**
+The library-matching step that assigns precise precursor m/z to ms2-only features can now be disabled via a new `enable_library_mz_inference` flag (default OFF). It is very slow and typically benefits only a handful of features. The neutral-loss consensus method still runs regardless. A new "Library m/z Inference" checkbox is exposed in the GUI Detection tab. Library annotation in Stage 6.5 is unaffected.
+
+### Bug Fixes
+
+- **Stage 4: false-positive isotope pairs eliminated**. The Tier 2.5 fragment-set Jaccard fallback for sparse ms2-only pairs occasionally linked features whose MS2 shared a few common low-mass fragments but were chemically distinct (e.g. a pair separated by ~1 min in RT and unrelated fragmentation). The new step-pattern check is more specific. Tier 2.5 is now disabled by default.
+
+- **Stage 4: missed isotope pairs recovered**. True isotope partners with very different fragment intensities (e.g. F00362/F00414 in the demo: lighter is ~3× more intense) now pass the step-pattern test even when modified cosine alone would fail. Demo run: isotope removals jumped from 0 (v0.3) → 150 (v0.4) → 176 (v0.5).
+
+- **Stage 5b: over-broad spectral-duplicate groups split**. The previous fixed `duplicate_rt_tolerance` of 0.2 min linked features spanning ~0.4 min RT, far beyond any plausible duplicate. The cycle-aware 4-cycle gate keeps groups tight (e.g. F00239 group RT span 0.46 min → 0.022 min on the demo data). Genuinely distinct features that merely share spectra are no longer collapsed into a single duplicate group.
+
+### Parameter Default Changes
+
+| Parameter | Old | New | Rationale |
+|-----------|-----|-----|-----------|
+| `isotope_apex_rt_strict` | 0.05 min (fixed) | `isotope_apex_rt_n_cycles` × cycle_time (default 2 cycles) | True isotopes co-elute within ~2 scan cycles |
+| `duplicate_rt_tolerance` | 0.2 min (fixed) | `duplicate_rt_n_cycles` × cycle_time (default 4 cycles) | Avoid collapsing distinct features that happen to share spectra |
+| `isotope_overlap_ratio` | 0.80 | 0.70 | M+1 boundaries are noisier than M+0; the strict apex gate compensates |
+| `isotope_ms2only_jaccard_fallback` | True | False | Replaced by step-pattern; the Jaccard fallback caused false positives |
+| `enable_library_mz_inference` | (always on) | False | Slow; few features benefit; user-toggleable in GUI |
+
+### GUI
+
+- New **Library m/z Inference** checkbox in the Detection tab.
+- Window title and About dialog now read the package `__version__` directly so the displayed version always matches the build.

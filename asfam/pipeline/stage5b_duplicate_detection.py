@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, Callable
 
+import numpy as np
+
 from asfam.config import ProcessingConfig
 from asfam.models import CandidateFeature
 from asfam.core.similarity import cosine_similarity
@@ -21,15 +23,47 @@ from asfam.core.clustering import connected_components
 logger = logging.getLogger(__name__)
 
 
+def _resolve_duplicate_rt(
+    config: ProcessingConfig,
+    data_by_replicate: Optional[dict] = None,
+) -> float:
+    """Compute the duplicate RT gate from the data's actual scan cycle time.
+
+    duplicate_rt_n_cycles cycles * median(cycle_time). Falls back to
+    duplicate_rt_fallback if cycle time cannot be determined.
+    """
+    n_cycles = max(1, int(getattr(config, "duplicate_rt_n_cycles", 4)))
+    fallback = float(getattr(config, "duplicate_rt_fallback", 0.07))
+    if not data_by_replicate:
+        return fallback
+    cycle_times: list[float] = []
+    for segments in data_by_replicate.values():
+        for raw in segments:
+            try:
+                rt = np.asarray(raw.rt_array, dtype=np.float64)
+                if rt.size >= 2:
+                    diffs = np.diff(rt)
+                    diffs = diffs[diffs > 0]
+                    if diffs.size:
+                        cycle_times.append(float(np.median(diffs)))
+            except Exception:
+                continue
+    if not cycle_times:
+        return fallback
+    cycle_time = float(np.median(cycle_times))
+    return n_cycles * cycle_time
+
+
 def run_stage5b(
     features_by_replicate: dict[str, list[CandidateFeature]],
     config: ProcessingConfig,
     progress_callback: Optional[Callable] = None,
+    data_by_replicate: Optional[dict] = None,
 ) -> dict[str, list[CandidateFeature]]:
     """Flag duplicate features within each replicate.
 
     Two active features are linked as duplicates if:
-      1. |RT_a - RT_b| <= duplicate_rt_tolerance  (default 0.2 min)
+      1. |RT_a - RT_b| <= duplicate_rt (~4 scan cycles, computed from data)
       2. |mz_a - mz_b| <= duplicate_mz_tolerance  (default 0.5 Da)
       3. cosine(ms2_a, ms2_b) >= duplicate_cosine_threshold  (default 0.85)
          with >= duplicate_min_matched matched peaks
@@ -40,7 +74,11 @@ def run_stage5b(
 
     Returns the same dict (modified in place).
     """
-    logger.info("Stage 5b: Duplicate detection...")
+    duplicate_rt = _resolve_duplicate_rt(config, data_by_replicate)
+    logger.info(
+        "Stage 5b: Duplicate detection (rt_tol=%.4f min)...",
+        duplicate_rt,
+    )
     total_flagged = 0
 
     for rep_id, features in features_by_replicate.items():
@@ -65,7 +103,7 @@ def run_stage5b(
 
                 # RT check (sorted, so can break early)
                 rt_diff = abs(fj.rt_apex - fi.rt_apex)
-                if rt_diff > config.duplicate_rt_tolerance:
+                if rt_diff > duplicate_rt:
                     break
 
                 # m/z check
@@ -97,7 +135,7 @@ def run_stage5b(
         # Connected components can form transitive chains spanning a huge RT
         # range.  Sort each component by RT and break at any gap larger than
         # the pairwise tolerance.
-        max_rt_gap = config.duplicate_rt_tolerance
+        max_rt_gap = duplicate_rt
         components = []
         for comp in raw_components:
             if len(comp) <= 1:

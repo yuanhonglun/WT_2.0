@@ -20,18 +20,19 @@ class ProcessingConfig:
     eic_smoothing_method: str = "savgol"
     eic_smoothing_window: int = 7      # Savitzky-Golay window length
     eic_smoothing_polyorder: int = 3
-    peak_height_threshold: float = 200.0
+    peak_height_threshold: float = 500.0
     peak_sn_threshold: float = 5.0
     peak_width_min: int = 3            # minimum peak width in scans
     peak_prominence: float = 100.0
-    peak_gaussian_threshold: float = 0.6  # minimum gaussian similarity (0 = off)
+    peak_gaussian_threshold: float = 0.75  # minimum gaussian similarity (0 = off)
     rt_cluster_tolerance: float = 0.02  # min, for grouping co-eluting ions
+    cluster_max_apex_span: float = 0.05  # min, max span of apex RTs within a cluster
     min_fragments_per_feature: int = 2
 
     # -- Stage 1: MS2 ion recall (second pass) --
     recall_enabled: bool = True
-    recall_min_intensity: float = 50.0   # minimum raw intensity at apex for recalled ion
-    recall_min_consecutive: int = 2      # minimum consecutive nonzero cycles around apex
+    recall_min_intensity: float = 200.0  # minimum raw intensity at apex for recalled ion
+    recall_min_consecutive: int = 4      # minimum consecutive nonzero cycles around apex
     recall_apex_window: int = 2          # +/- cycles around consensus apex to search
 
     # -- Stage 2: MS1 assignment --
@@ -43,6 +44,10 @@ class ProcessingConfig:
 
     # -- Stage 2.5: MS2-only m/z inference --
     min_fragments_for_inference: int = 3
+    enable_library_mz_inference: bool = False   # Library-matching step for ms2_only features.
+                                                # Very slow and typically assigns only a handful of
+                                                # features, so OFF by default. Neutral-loss consensus
+                                                # still runs regardless.
     matchms_similarity_threshold: float = 0.8   # total score cutoff
     matchms_min_matched_peaks: int = 3          # MS-DIAL default: 3
     matchms_min_matched_pct: float = 0.25       # MS-DIAL: 25% of ref peaks
@@ -55,8 +60,9 @@ class ProcessingConfig:
 
     # -- Stage 4: Isotope deduplication --
     isotope_rt_tolerance: float = 0.1           # min (search window; overlap ratio is primary criterion)
-    isotope_apex_rt_strict: float = 0.05        # min, hard max for apex RT difference between isotope pairs
-    isotope_overlap_ratio: float = 0.80
+    isotope_apex_rt_n_cycles: int = 2           # hard max apex RT diff in #scan cycles (computed from data)
+    isotope_apex_rt_fallback: float = 0.04      # min, fallback if cycle time unavailable
+    isotope_overlap_ratio: float = 0.70
     isotope_mz_tolerance: float = 0.01          # Da, classic gaps
     isotope_integer_step_tolerance: float = 0.02  # Da, relaxed gaps
     isotope_fragment_mz_tolerance: float = 0.02
@@ -68,6 +74,20 @@ class ProcessingConfig:
     isotope_nl_cos_threshold: float = 0.85
     isotope_min_nl_matches: int = 3
     isotope_max_step: int = 4
+    # MS2 step-pattern evidence (primary detector for isotope pairs).
+    # True isotope partners share the property that the heavier feature's
+    # MS2 "echoes" the lighter feature's MS2 shifted by ~+1.003355 Da
+    # (when the fragment retains the heavy atom). This is robust to low
+    # cosine similarity caused by intensity differences.
+    isotope_step_top_n: int = 6                # # of high-response ions to inspect
+    isotope_step_min_ratio: float = 0.5        # min fraction of top-N ions that must show the +delta echo
+    isotope_step_mz_tolerance: float = 0.01    # Da, around mz + isotope_delta
+    # Tier 2.5 fallback: sparse MS2-only isotope pair detection via fragment-set Jaccard
+    # Disabled by default in v0.4.1 — replaced by step-pattern evidence (more accurate;
+    # Jaccard caused false positives like F01082/F01123).
+    isotope_ms2only_jaccard_fallback: bool = False
+    isotope_fragment_jaccard_threshold: float = 0.50
+    isotope_ms2only_apex_tight: float = 0.02   # min, tight apex gate for Tier 2.5
 
     # -- Stage 5: Adduct deduplication --
     adduct_rt_tolerance: float = 0.05  # min
@@ -75,7 +95,8 @@ class ProcessingConfig:
     adduct_eic_pearson_threshold: float = 0.9
 
     # -- Stage 5b: Duplicate detection --
-    duplicate_rt_tolerance: float = 0.2    # min
+    duplicate_rt_n_cycles: int = 4         # hard max RT diff in #scan cycles (computed from data)
+    duplicate_rt_fallback: float = 0.07    # min, fallback if cycle time unavailable (~4 cycles @ 1s)
     duplicate_mz_tolerance: float = 0.5    # Da
     duplicate_cosine_threshold: float = 0.85
     duplicate_min_matched: int = 3
@@ -104,7 +125,7 @@ class ProcessingConfig:
     final_sn_threshold: float = 5.0
     final_gaussian_threshold: float = 0.6
     msms_intensity_threshold: float = 1000.0
-    msms_relative_threshold: float = 0.01
+    msms_relative_threshold: float = 0.02
     msms_min_ions: int = 1
 
     # -----------------------------------------------------------------------
