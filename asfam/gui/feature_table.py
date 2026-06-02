@@ -30,6 +30,7 @@ COLUMNS = [
     ("Formula", "formula"),
     ("Adduct", "adduct"),
     ("Name", "name"),
+    ("Score", "score"),
 ]
 
 HIGH_COLOR = QColor(255, 255, 255)       # white (unused, kept for reference)
@@ -62,6 +63,27 @@ class FeatureTableModel(QAbstractTableModel):
         col_name, col_attr = COLUMNS[index.column()]
 
         if role == Qt.DisplayRole:
+            # Annotation columns (Name / Formula / Adduct / Score) read from the
+            # currently-selected match in feat.annotation_matches so that low-score
+            # hits also display, matching the GCMS feature table behavior. Falls
+            # back to feat.name / feat.formula / feat.adduct (set by Stage 2b
+            # library-guided inference for MS2-only features) when annotation_matches
+            # is empty.
+            if col_attr in ("name", "formula", "adduct", "score"):
+                sel = feat.selected_annotation
+                if sel is not None:
+                    if col_attr == "name":
+                        return sel.name or ""
+                    if col_attr == "formula":
+                        return sel.formula or ""
+                    if col_attr == "adduct":
+                        return sel.adduct or ""
+                    if col_attr == "score":
+                        return f"{sel.score:.3f}"
+                if col_attr == "score":
+                    return ""
+                fallback = getattr(feat, col_attr, None)
+                return str(fallback) if fallback else ""
             val = getattr(feat, col_attr, None)
             if val is None:
                 return ""
@@ -97,12 +119,22 @@ class FeatureTableModel(QAbstractTableModel):
             return None
 
         if role == Qt.TextAlignmentRole:
-            if col_attr in ("precursor_mz", "rt", "mean_height", "n_fragments", "cv", "sn_ratio"):
+            if col_attr in ("precursor_mz", "rt", "mean_height", "n_fragments",
+                            "cv", "sn_ratio", "score"):
                 return Qt.AlignRight | Qt.AlignVCenter
             return Qt.AlignLeft | Qt.AlignVCenter
 
         if role == Qt.UserRole:
-            # Return sortable value
+            # Return sortable value. For annotation columns the sort key
+            # is the numeric/string from the selected match, with absent
+            # matches sorting last under descending order.
+            if col_attr in ("name", "formula", "adduct", "score"):
+                sel = feat.selected_annotation
+                if sel is None:
+                    return float("-inf") if col_attr == "score" else ""
+                if col_attr == "score":
+                    return float(sel.score)
+                return getattr(sel, col_attr, "") or ""
             val = getattr(feat, col_attr, None)
             if val is None:
                 return 0
@@ -128,6 +160,7 @@ class FeatureSortProxy(QSortFilterProxyModel):
         super().__init__(parent)
         self._filter_text = ""
         self._show_duplicates = False
+        self._annotated_only = False
 
     def set_filter_text(self, text: str):
         self._filter_text = text.lower()
@@ -137,17 +170,27 @@ class FeatureSortProxy(QSortFilterProxyModel):
         self._show_duplicates = show
         self.invalidateFilter()
 
+    def set_annotated_only(self, on: bool):
+        """When True, hide rows whose top-1 match did not pass the
+        configured score threshold (i.e., feat.name is empty)."""
+        self._annotated_only = bool(on)
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row, source_parent):
         model = self.sourceModel()
+        feature = (model._features[source_row]
+                   if source_row < len(model._features) else None)
         # Duplicate filter
         if not self._show_duplicates:
-            feature = model._features[source_row] if source_row < len(model._features) else None
             if feature and feature.is_duplicate:
+                return False
+        # Annotated-only filter (above-threshold rows only)
+        if self._annotated_only:
+            if not feature or not feature.name:
                 return False
         # Text filter
         if not self._filter_text:
             return True
-        model = self.sourceModel()
         for col in range(model.columnCount()):
             idx = model.index(source_row, col, source_parent)
             data = model.data(idx, Qt.DisplayRole)

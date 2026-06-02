@@ -300,8 +300,9 @@ class MainWindow(QMainWindow):
         self.ms2_plot.annotationSelected.connect(self._on_annotation_selected)
 
     def _on_scatter_filter_changed(self):
-        """Sync feature table duplicate filter with scatter plot checkbox."""
+        """Sync feature table filters with scatter-plot checkboxes."""
         self.feature_table.proxy.set_show_duplicates(self.scatter_plot.show_duplicates)
+        self.feature_table.proxy.set_annotated_only(self.scatter_plot.annotated_only)
 
     # ------------------------------------------------------------------
     # Pipeline execution

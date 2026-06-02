@@ -1,6 +1,13 @@
 """Stage 6.5: Library annotation - match ALL features against spectral library.
 
-Returns top N matches per feature for user review.
+Returns top N matches per feature for user review. The score threshold
+(``matchms_similarity_threshold``) is *not* applied at storage time —
+all top-N matches that meet the basic n_matched / matched_pct sanity
+floor are kept so the GUI can show low-score hits and let the user
+gate visibility downstream. Only ``feat.matchms_name``, ``matchms_score``
+and ``inferred_formula`` (which propagate into ``Feature.name`` etc.)
+respect the threshold, so the existing "Annotated" filter and export
+semantics are unchanged.
 """
 from __future__ import annotations
 
@@ -61,13 +68,18 @@ def run_stage6b_annotation(
             if matches:
                 feat.annotation_matches = matches
                 feat.selected_annotation_idx = 0
-                # Backward-compatible: set top-1 fields
+                # Top-1 fields propagate into Feature.name/formula only when
+                # the top score clears the configured threshold. Below-threshold
+                # matches are still stored on annotation_matches so the GUI
+                # table can show them with their score, but don't flow into
+                # the legacy "annotated" semantics used by exports / scatter.
                 best = matches[0]
-                feat.matchms_name = best.name
-                feat.matchms_score = best.score
-                if best.formula:
-                    feat.inferred_formula = best.formula
-                n_matched += 1
+                if best.score >= config.matchms_similarity_threshold:
+                    feat.matchms_name = best.name
+                    feat.matchms_score = best.score
+                    if best.formula:
+                        feat.inferred_formula = best.formula
+                    n_matched += 1
             else:
                 feat.annotation_matches = []
 
@@ -193,8 +205,7 @@ def _match_feature_topn(
         n_ref_sig = sum(1 for _, i in ref_peaks if i >= max_ref_int * 0.01)
         matched_pct = n_matched / max(n_ref_sig, 1)
 
-        if (score >= config.matchms_similarity_threshold and
-                n_matched >= config.matchms_min_matched_peaks and
+        if (n_matched >= config.matchms_min_matched_peaks and
                 matched_pct >= config.matchms_min_matched_pct):
             meta = spec.get("metadata", {})
             hits.append({

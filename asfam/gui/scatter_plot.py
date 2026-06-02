@@ -93,6 +93,10 @@ class ScatterPlotWidget(QWidget):
     def show_duplicates(self) -> bool:
         return self._chk_duplicates.isChecked()
 
+    @property
+    def annotated_only(self) -> bool:
+        return self._chk_annotated.isChecked()
+
     # Duplicate type -> line color
     _DUP_COLORS = {"isotope": "#2196F3", "adduct": "#4CAF50", "isf": "#FF9800", "spectral": "#9C27B0"}
 

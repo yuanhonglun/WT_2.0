@@ -44,13 +44,9 @@ class EICPlotWidget(QWidget):
         self._btn_smooth = QPushButton("Smoothed")
         self._btn_smooth.setCheckable(True)
         self._btn_smooth.setChecked(True)
-        self._btn_smooth.setFixedWidth(80)
-        self._btn_smooth.setStyleSheet(
-            "QPushButton { font-size: 10px; padding: 2px 6px; }"
-            "QPushButton:checked { background: #2D6A9F; color: white; }"
-        )
         self._btn_smooth.toggled.connect(self._on_smooth_toggled)
         toolbar_row.addWidget(self._btn_smooth)
+        toolbar_row.addStretch(1)
         layout.addLayout(toolbar_row)
         layout.addWidget(self.canvas)
 
@@ -158,9 +154,8 @@ class EICPlotWidget(QWidget):
             ax_ms1.text(0.5, 0.5, "No MS1 signal", transform=ax_ms1.transAxes,
                         ha="center", va="center", color="gray", fontsize=10)
 
-        ax_ms1.axvline(feature.rt, color="red", linestyle="-", alpha=0.3, linewidth=1)
-        ax_ms1.axvline(feature.rt_left, color="gray", linestyle=":", alpha=0.5)
-        ax_ms1.axvline(feature.rt_right, color="gray", linestyle=":", alpha=0.5)
+        ax_ms1.axvspan(feature.rt_left, feature.rt_right, alpha=0.12, color="orange")
+        ax_ms1.axvline(feature.rt, color="red", linestyle=":", alpha=0.4)
         sig = "MS1" if feature.signal_type == "ms1_detected" else "MS2"
         sm_tag = "" if use_smooth else " [Raw]"
         ax_ms1.set_title(f"MS1 EIC: m/z {mz:.4f} ({sig}){sm_tag}", fontsize=9, color=THEME_BLUE)
@@ -203,9 +198,8 @@ class EICPlotWidget(QWidget):
                         y = smooth_eic(eic_int, "savgol", 7, 3) if use_smooth else eic_int
                         ax_ms2.plot(seg_to_use.rt_array, y, color=ion_colors[j % len(ion_colors)],
                                     alpha=0.7, linewidth=0.9, label=f"{ion_mz:.3f}")
-                ax_ms2.axvline(feature.rt, color="red", linestyle="-", alpha=0.3)
-                ax_ms2.axvline(feature.rt_left, color="gray", linestyle=":", alpha=0.5)
-                ax_ms2.axvline(feature.rt_right, color="gray", linestyle=":", alpha=0.5)
+                ax_ms2.axvspan(feature.rt_left, feature.rt_right, alpha=0.12, color="orange")
+                ax_ms2.axvline(feature.rt, color="red", linestyle=":", alpha=0.4)
                 ax_ms2.legend(fontsize=6, loc="upper right", ncol=2,
                               title="Product m/z", title_fontsize=7)
             else:
