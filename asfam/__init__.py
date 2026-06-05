@@ -1,2 +1,2 @@
 """ASFAMProcessor - ASFAM data processing software."""
-__version__ = "0.5.260506"
+__version__ = "0.5.260605b"

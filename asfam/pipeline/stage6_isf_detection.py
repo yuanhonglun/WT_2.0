@@ -28,12 +28,13 @@ def run_stage6(
     """
     logger.info("Stage 6: In-source fragmentation detection...")
 
-    raw_lookup: dict[tuple[str, int], RawSegmentData] = {}
-    for rep_id, segments in data_by_replicate.items():
-        for seg in segments:
-            raw_lookup[(seg.segment_name, seg.replicate_id)] = seg
-
     for rep_id, features in features_by_replicate.items():
+        # Per-rep segment lookup (see Stage 2 for the rationale).
+        rep_segments = data_by_replicate.get(rep_id, [])
+        raw_lookup: dict[str, RawSegmentData] = {
+            seg.segment_name: seg for seg in rep_segments
+        }
+
         active = [f for f in features if f.status == "active"]
         n_before = len(active)
 
@@ -68,9 +69,7 @@ def run_stage6(
                     continue
 
                 # Criterion 2: EIC correlation
-                raw_data = raw_lookup.get(
-                    (child.segment_name, child.replicate_id)
-                )
+                raw_data = raw_lookup.get(child.segment_name)
                 if raw_data is None:
                     continue
 

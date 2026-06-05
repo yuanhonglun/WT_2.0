@@ -30,12 +30,17 @@ def run_stage2(
     """
     logger.info("Stage 2: MS1 precise m/z assignment...")
 
-    raw_lookup: dict[tuple[str, int], RawSegmentData] = {}
-    for rep_id, segments in data_by_replicate.items():
-        for seg in segments:
-            raw_lookup[(seg.segment_name, seg.replicate_id)] = seg
-
     for rep_id, features in features_by_replicate.items():
+        # Per-rep raw-data lookup keyed by segment_name. Scoping the lookup
+        # to the current rep avoids cross-sample collisions when multiple
+        # samples share the same integer replicate_id (e.g. files named
+        # CK1_075-110_P.mzML and CK2_075-110_P.mzML both parse to rep=1
+        # because the filename has no numeric replicate suffix).
+        rep_segments = data_by_replicate.get(rep_id, [])
+        raw_lookup: dict[str, RawSegmentData] = {
+            seg.segment_name: seg for seg in rep_segments
+        }
+
         n_high = 0
         n_low = 0
         n_low_with_ms1 = 0
@@ -50,12 +55,11 @@ def run_stage2(
         ms1_cache_relaxed: dict[tuple[str, int], tuple[list, RawSegmentData]] = {}
 
         for (seg_name, channel), feat_indices in channel_groups.items():
-            sample_feat = features[feat_indices[0]]
-            raw_data = raw_lookup.get((seg_name, sample_feat.replicate_id))
+            raw_data = raw_lookup.get(seg_name)
             if raw_data is None:
                 for fi in feat_indices:
                     features[fi].signal_type = "ms2_only"
-                    _assign_representative_ion(features[fi])
+                    _assign_representative_ion(features[fi], None, config)
                     n_low += 1
                 continue
 
@@ -108,7 +112,7 @@ def run_stage2(
                                         break
                             n_high += 1
                             continue
-                    _assign_representative_ion(features[fi])
+                    _assign_representative_ion(features[fi], raw_data, config)
                     n_low += 1
 
         if progress_callback:
@@ -338,11 +342,17 @@ def _try_relaxed_ms1_assign(
     return True
 
 
-def _assign_representative_ion(feature: CandidateFeature) -> None:
+def _assign_representative_ion(
+    feature: CandidateFeature,
+    raw_data: Optional[RawSegmentData],
+    config: ProcessingConfig,
+) -> None:
     """For ms2_only features, use the highest product ion as representative.
 
-    Sets ms1_height, ms1_sn, and ms2_rep_ion_mz from the product ion
-    with the highest intensity (ties broken by largest m/z).
+    Sets ms1_height, ms1_sn, ms1_area, and ms2_rep_ion_mz from the product
+    ion with the highest intensity (ties broken by largest m/z). Area is
+    integrated from the raw MS2 EIC of the representative ion across the
+    feature's RT window when raw_data is available.
     """
     if feature.ms2_intensity is None or len(feature.ms2_intensity) == 0:
         return
@@ -352,8 +362,59 @@ def _assign_representative_ion(feature: CandidateFeature) -> None:
     # Tie-break: largest m/z
     best_idx = candidates[np.argmax(feature.ms2_mz[candidates])]
 
+    rep_mz = float(feature.ms2_mz[best_idx])
     feature.ms1_height = float(feature.ms2_intensity[best_idx])
-    feature.ms2_rep_ion_mz = float(feature.ms2_mz[best_idx])
+    feature.ms2_rep_ion_mz = rep_mz
 
     if feature.ms2_sn is not None and best_idx < len(feature.ms2_sn):
         feature.ms1_sn = float(feature.ms2_sn[best_idx])
+
+    if raw_data is not None:
+        feature.ms1_area = _integrate_ms2_ion_area(
+            raw_data,
+            feature.precursor_mz_nominal,
+            rep_mz,
+            feature.rt_left,
+            feature.rt_right,
+            config.eic_mz_tolerance,
+        )
+
+
+def _integrate_ms2_ion_area(
+    raw_data: RawSegmentData,
+    precursor_channel: int,
+    product_mz: float,
+    rt_left: float,
+    rt_right: float,
+    mz_tolerance: float,
+) -> float:
+    """Trapezoidal integration of one MS2 ion EIC over [rt_left, rt_right].
+
+    Returns area in intensity·second (MS-DIAL convention: trapz in minutes
+    multiplied by 60).
+    """
+    adaptive_tol = max(mz_tolerance, float(precursor_channel) * 100e-6)
+    rt_array = raw_data.rt_array
+    mask_rt = (rt_array >= rt_left) & (rt_array <= rt_right)
+    if not np.any(mask_rt):
+        return 0.0
+
+    rt_in = rt_array[mask_rt]
+    int_in = np.zeros(len(rt_in), dtype=np.float64)
+    cycle_indices = np.where(mask_rt)[0]
+    for j, ci in enumerate(cycle_indices):
+        cycle = raw_data.cycles[ci]
+        if precursor_channel not in cycle.ms2_scans:
+            continue
+        prod_mz, prod_int = cycle.ms2_scans[precursor_channel]
+        if len(prod_mz) == 0:
+            continue
+        m = np.abs(prod_mz - product_mz) <= adaptive_tol
+        if np.any(m):
+            int_in[j] = float(np.max(prod_int[m]))
+
+    if not np.any(int_in > 0):
+        return 0.0
+
+    _trapz = getattr(np, "trapezoid", None) or np.trapz
+    return float(_trapz(int_in, rt_in)) * 60.0

@@ -91,8 +91,13 @@ def detect_peaks(
         if n_pts > 0 and n_zeros / n_pts > 0.20:
             continue
 
-        area = float(np.trapz(intensity_array[left_idx:right_idx + 1],
-                               rt_array[left_idx:right_idx + 1]))
+        # rt_array is in minutes (pymzml scan_time_in_minutes). MS-DIAL
+        # convention: report peak area in intensity·second so area > height
+        # for typical chromatographic peaks. Multiply trapz result by 60.
+        # numpy 2.0 removed np.trapz; use np.trapezoid (fallback for <2.0).
+        _trapz = getattr(np, "trapezoid", None) or np.trapz
+        area = float(_trapz(intensity_array[left_idx:right_idx + 1],
+                             rt_array[left_idx:right_idx + 1])) * 60.0
         noise = _estimate_noise(intensity_array, left_idx, right_idx)
         sn = apex_height / max(noise, 1.0)
 

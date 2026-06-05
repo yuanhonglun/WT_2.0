@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import logging
-import re
 import sys
 from pathlib import Path
 from typing import Optional, Callable
 
 from asfam.config import ProcessingConfig
 from asfam.models import RawSegmentData
-from asfam.io.mzml_reader import load_mzml
+from asfam.io.mzml_reader import load_mzml, auto_group_files
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +64,13 @@ def run_stage0(
     if not loaded:
         raise RuntimeError("No mzML files could be loaded")
 
-    # Organize by sample
-    if sample_groups:
-        by_sample = _organize_by_custom_groups(loaded, sample_groups)
-    else:
-        by_sample = _organize_by_replicate(loaded)
+    # Organize by sample. When no explicit groups were supplied (typical
+    # for CLI invocations), fall back to the same filename-driven grouping
+    # the GUI uses, so per-sample column names downstream match the input
+    # filenames rather than collapsing on the integer replicate_id.
+    if not sample_groups:
+        sample_groups = auto_group_files(list(loaded.keys()))
+    by_sample = _organize_by_custom_groups(loaded, sample_groups)
 
     # Sort segments within each sample by segment_low
     for sample_id in by_sample:
@@ -83,17 +84,6 @@ def run_stage0(
                      sample_id, seg_names, total_cycles)
 
     return by_sample
-
-
-def _organize_by_replicate(loaded: dict[str, RawSegmentData]) -> dict[str, list[RawSegmentData]]:
-    """Auto-group by replicate ID from RawSegmentData."""
-    by_rep: dict[str, list[RawSegmentData]] = {}
-    for path, data in loaded.items():
-        key = str(data.replicate_id)
-        if key not in by_rep:
-            by_rep[key] = []
-        by_rep[key].append(data)
-    return by_rep
 
 
 def _organize_by_custom_groups(
@@ -120,9 +110,10 @@ def _organize_by_custom_groups(
                 logger.warning("File not found in loaded data: %s (skipping)", fp)
 
         if segments:
-            # Use a simple ID for internal tracking
-            sample_id = str(len(by_sample) + 1)
-            by_sample[sample_id] = segments
+            # Preserve the user-given sample name so it propagates through the
+            # pipeline (it becomes the rep_id key in features_by_replicate and
+            # the per-sample column suffix in the exported CSV).
+            by_sample[sample_name] = segments
 
     # Handle any loaded files not in any group
     assigned = set()

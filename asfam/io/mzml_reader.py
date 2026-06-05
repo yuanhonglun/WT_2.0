@@ -77,6 +77,41 @@ def parse_filename(filepath: str, pattern: Optional[str] = None) -> dict:
     )
 
 
+def auto_group_files(paths: list[str]) -> dict:
+    """Auto-group mzML file paths into samples by parsing filenames.
+
+    Two-pass strategy: parse each file's sample/rep, then for each sample,
+    decide whether the parsed rep distinguishes its files. When all files
+    of a sample share the same rep value the "_repN" suffix is dropped so
+    the dict key matches the user's filename prefix (e.g. ``CK1`` rather
+    than ``CK1_rep1`` for ``CK1_075-110_P.mzML``).
+
+    Returns
+    -------
+    dict mapping sample_key -> list of file paths.
+    """
+    parsed: list[tuple[str, str, object]] = []
+    for p in paths:
+        try:
+            info = parse_filename(p)
+            parsed.append((p, info["sample"], info["rep"]))
+        except ValueError:
+            parsed.append((p, Path(p).stem, None))
+
+    sample_reps: dict[str, set] = {}
+    for _, sample, rep in parsed:
+        sample_reps.setdefault(sample, set()).add(rep)
+
+    groups: dict[str, list[str]] = {}
+    for p, sample, rep in parsed:
+        if rep is None or len(sample_reps[sample]) <= 1:
+            key = sample
+        else:
+            key = f"{sample}_rep{rep}"
+        groups.setdefault(key, []).append(p)
+    return groups
+
+
 def _extract_groups(m: re.Match) -> dict:
     """Extract named groups from a regex match, with defaults."""
     d = m.groupdict()

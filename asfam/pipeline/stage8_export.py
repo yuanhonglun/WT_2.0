@@ -90,10 +90,12 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
             "name": f.name or "",
             "ms2_spectrum": f.ms2_as_str(),
         }
-        # Add per-replicate columns
-        for rep_id in sorted(f.heights.keys()):
-            row[f"height_rep{rep_id}"] = round(f.heights.get(rep_id, 0), 1)
-            row[f"area_rep{rep_id}"] = round(f.areas.get(rep_id, 0), 1)
+        # Add per-sample columns. The dict key is the sample name carried
+        # over from stage 0 (e.g. "CK1", "S2"), so the column name reflects
+        # the user-given identifier rather than an opaque integer.
+        for rep_id in sorted(f.heights.keys(), key=str):
+            row[f"height_{rep_id}"] = round(f.heights.get(rep_id, 0), 1)
+            row[f"area_{rep_id}"] = round(f.areas.get(rep_id, 0), 1)
 
         rows.append(row)
 

@@ -25,13 +25,15 @@ def run_stage5(
     """Adduct deduplication for each replicate."""
     logger.info("Stage 5: Adduct deduplication...")
 
-    # Build raw data lookup
-    raw_lookup: dict[tuple[str, int], RawSegmentData] = {}
-    for rep_id, segments in data_by_replicate.items():
-        for seg in segments:
-            raw_lookup[(seg.segment_name, seg.replicate_id)] = seg
-
     for rep_id, features in features_by_replicate.items():
+        # Per-rep segment lookup (see Stage 2 for the rationale: an integer
+        # replicate_id is not unique across samples when filenames lack a
+        # numeric rep suffix).
+        rep_segments = data_by_replicate.get(rep_id, [])
+        raw_lookup: dict[str, RawSegmentData] = {
+            seg.segment_name: seg for seg in rep_segments
+        }
+
         active = [f for f in features if f.status == "active"]
         n_before = len(active)
 
@@ -63,9 +65,7 @@ def run_stage5(
                         continue
 
                     # EIC correlation validation
-                    raw_data = raw_lookup.get(
-                        (fi.segment_name, fi.replicate_id)
-                    )
+                    raw_data = raw_lookup.get(fi.segment_name)
                     if raw_data is not None:
                         corr = _compute_eic_correlation(
                             fi, fj, raw_data, config,

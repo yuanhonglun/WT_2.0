@@ -514,30 +514,9 @@ class GroupEditDialog(QDialog):
 
 
 def _auto_group_files(paths: list[str]) -> dict:
-    """Auto-group files by sample+replicate using flexible filename parsing.
-
-    Uses parse_filename to extract sample name and replicate ID.
-    Files with the same (sample, rep) belong to the same sample.
-    """
-    from asfam.io.mzml_reader import parse_filename
-
-    groups: dict[str, list[str]] = {}
-
-    for p in paths:
-        try:
-            info = parse_filename(p)
-            # Group key: sample name + replicate ID
-            key = f"{info['sample']}_rep{info['rep']}"
-        except ValueError:
-            # Fallback: use filename as-is
-            key = Path(p).stem
-
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(p)
-
-    # Use the grouping key as sample name (e.g., "CK1_rep1", "MIX_rep2")
-    return groups
+    """GUI alias for the shared auto-grouping helper."""
+    from asfam.io.mzml_reader import auto_group_files
+    return auto_group_files(paths)
 
 
 def _dbl_spin(value, lo, hi, step, decimals=1):

@@ -128,6 +128,27 @@ def run_stage7(
         n_matched = sum(1 for r, c in zip(row_ind, col_ind) if sim_matrix[r, c] > 0.5)
         logger.info("  Replicate %s: %d/%d features matched", rep_id, n_matched, n_target)
 
+    # Gap-fill: for each aligned feature, integrate raw data of any rep
+    # that has no matched feature. Without this, missing-in-some-reps looks
+    # like real absence, but typically it's just sub-threshold detection in
+    # that rep (MS-DIAL behaves the same way).
+    gap_fills_per_aln: list[dict[str, tuple[float, float]]] = [
+        {} for _ in aligned
+    ]
+    for rep_id in rep_ids:
+        rep_segments = data_by_replicate.get(rep_id, [])
+        seg_lookup = {seg.segment_name: seg for seg in rep_segments}
+        for idx, aln in enumerate(aligned):
+            if rep_id in aln["matches"]:
+                continue
+            ref_feat = aln["ref_feature"]
+            raw = seg_lookup.get(ref_feat.segment_name)
+            if raw is None:
+                continue
+            h, a = _gap_fill_quant(ref_feat, raw, config)
+            if h > 0 or a > 0:
+                gap_fills_per_aln[idx][rep_id] = (h, a)
+
     # Convert to Feature objects
     result: list[Feature] = []
     for i, aln in enumerate(aligned):
@@ -139,6 +160,9 @@ def run_stage7(
         for rid, feat in matches.items():
             h = feat.ms1_height if feat.ms1_height else 0.0
             a = feat.ms1_area if feat.ms1_area else 0.0
+            heights[rid] = h
+            areas[rid] = a
+        for rid, (h, a) in gap_fills_per_aln[i].items():
             heights[rid] = h
             areas[rid] = a
 
@@ -189,6 +213,68 @@ def run_stage7(
         progress_callback("stage7", 1, 1, "Alignment complete")
 
     return result
+
+
+def _gap_fill_quant(
+    ref_feat: CandidateFeature,
+    raw_data: RawSegmentData,
+    config: ProcessingConfig,
+) -> tuple[float, float]:
+    """Integrate one rep's raw EIC at the reference feature's RT window.
+
+    For ms1_detected features: integrate MS1 EIC at precursor_mz.
+    For ms2_only features: integrate the MS2 EIC of the representative
+    product ion within the same precursor channel.
+
+    Returns (height, area) where height is the apex value within the
+    window and area is trapezoidal integration × 60 (intensity·s, MS-DIAL
+    convention).
+    """
+    rt_left = ref_feat.rt_left
+    rt_right = ref_feat.rt_right
+    rt_array = raw_data.rt_array
+    mask_rt = (rt_array >= rt_left) & (rt_array <= rt_right)
+    if not np.any(mask_rt):
+        return 0.0, 0.0
+
+    rt_in = rt_array[mask_rt]
+    cycle_indices = np.where(mask_rt)[0]
+
+    if ref_feat.signal_type == "ms2_only" and ref_feat.ms2_rep_ion_mz is not None:
+        channel = ref_feat.precursor_mz_nominal
+        target_mz = float(ref_feat.ms2_rep_ion_mz)
+        adaptive_tol = max(config.eic_mz_tolerance, float(channel) * 100e-6)
+        int_in = np.zeros(len(rt_in), dtype=np.float64)
+        for j, ci in enumerate(cycle_indices):
+            cycle = raw_data.cycles[ci]
+            if channel not in cycle.ms2_scans:
+                continue
+            prod_mz, prod_int = cycle.ms2_scans[channel]
+            if len(prod_mz) == 0:
+                continue
+            m = np.abs(prod_mz - target_mz) <= adaptive_tol
+            if np.any(m):
+                int_in[j] = float(np.max(prod_int[m]))
+    else:
+        target_mz = ref_feat.ms1_precursor_mz or ref_feat.precursor_mz
+        target_mz = float(target_mz)
+        tol = config.ms1_mz_tolerance
+        int_in = np.zeros(len(rt_in), dtype=np.float64)
+        for j, ci in enumerate(cycle_indices):
+            cycle = raw_data.cycles[ci]
+            if cycle.ms1_mz is None or len(cycle.ms1_mz) == 0:
+                continue
+            m = np.abs(cycle.ms1_mz - target_mz) <= tol
+            if np.any(m):
+                int_in[j] = float(np.max(cycle.ms1_intensity[m]))
+
+    if not np.any(int_in > 0):
+        return 0.0, 0.0
+
+    height = float(np.max(int_in))
+    _trapz = getattr(np, "trapezoid", None) or np.trapz
+    area = float(_trapz(int_in, rt_in)) * 60.0
+    return height, area
 
 
 def _gaussian_similarity(
