@@ -27,7 +27,7 @@ def test_issue_tags_have_stable_order():
     assert ISSUE_TAGS[-1] == "other"
 
 
-def test_every_tag_has_chinese_label():
+def test_every_tag_has_label():
     for tag in ISSUE_TAGS:
         assert tag in TAG_LABELS
         assert TAG_LABELS[tag]

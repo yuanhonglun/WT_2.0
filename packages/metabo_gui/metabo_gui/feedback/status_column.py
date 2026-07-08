@@ -31,13 +31,13 @@ def tooltip_for_entry(entry: FeedbackEntry | None) -> str:
     if entry.tags:
         # Include both tag name and label for clarity
         tag_strs = [f"{t} ({TAG_LABELS.get(t, t)})" for t in entry.tags]
-        parts.append("问题: " + ", ".join(tag_strs))
+        parts.append("Issues: " + ", ".join(tag_strs))
     if entry.verified_good:
         parts.append("Verified good")
     if entry.comment:
         first_line = entry.comment.splitlines()[0]
-        parts.append(f"备注: {first_line}")
-    parts.append(f"更新于 {entry.updated_at}")
+        parts.append(f"Comment: {first_line}")
+    parts.append(f"Updated {entry.updated_at}")
     return "\n".join(parts)
 
 

@@ -18,15 +18,15 @@ ISSUE_TAGS: tuple[str, ...] = (
 VERIFIED_GOOD_TAG = "verified_good"
 
 TAG_LABELS: dict[str, str] = {
-    "peak_split": "峰被拆开",
-    "noise": "噪音被识别",
-    "missed_dup": "漏标重复",
-    "false_dup": "错标重复",
-    "wrong_annot": "注释错误",
-    "ms2_excess": "MS2 过多",
-    "ms2_insufficient": "MS2 太少",
-    "other": "其它",
-    VERIFIED_GOOD_TAG: "已确认无误",
+    "peak_split": "Peak split",
+    "noise": "Noise",
+    "missed_dup": "Missed duplicate",
+    "false_dup": "False duplicate",
+    "wrong_annot": "Wrong annotation",
+    "ms2_excess": "MS2 excess",
+    "ms2_insufficient": "MS2 insufficient",
+    "other": "Other",
+    VERIFIED_GOOD_TAG: "Verified good",
 }
 
 STATUS_COLUMN_LABELS: dict[str, str] = {

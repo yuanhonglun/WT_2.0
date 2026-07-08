@@ -70,11 +70,11 @@ class NotesDock(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self.header_label = QLabel("(无选中 feature)")
+        self.header_label = QLabel("(No feature selected)")
         self.header_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.header_label)
 
-        layout.addWidget(QLabel("问题标签 (可多选):"))
+        layout.addWidget(QLabel("Issue tags (multi-select):"))
         tag_row = QHBoxLayout()
         self.tag_checkboxes: dict[str, QCheckBox] = {}
         for tag in ISSUE_TAGS:
@@ -89,7 +89,7 @@ class NotesDock(QDockWidget):
         self.verified_checkbox.toggled.connect(self._on_tag_or_verified_toggled)
         layout.addWidget(self.verified_checkbox)
 
-        layout.addWidget(QLabel("备注:"))
+        layout.addWidget(QLabel("Comment:"))
         self.comment_edit = QPlainTextEdit()
         self.comment_edit.textChanged.connect(self._on_comment_changed)
         layout.addWidget(self.comment_edit, stretch=1)
@@ -98,7 +98,7 @@ class NotesDock(QDockWidget):
         self.timestamp_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(self.timestamp_label)
 
-        self.clear_button = QPushButton("清除该 feature 的所有反馈")
+        self.clear_button = QPushButton("Clear all feedback for this feature")
         self.clear_button.clicked.connect(self._on_clear_clicked)
         layout.addWidget(self.clear_button)
 
@@ -110,7 +110,7 @@ class NotesDock(QDockWidget):
             fid = self._current_feature_id
             sig = self._current_signature
             if fid is None or sig is None:
-                self.header_label.setText("(无选中 feature)")
+                self.header_label.setText("(No feature selected)")
                 for cb in self.tag_checkboxes.values():
                     cb.setChecked(False)
                 self.verified_checkbox.setChecked(False)
@@ -199,8 +199,8 @@ class NotesDock(QDockWidget):
         if self._current_feature_id is None:
             return
         reply = QMessageBox.question(
-            self, "清除反馈",
-            f"清除 feature {self._current_feature_id} 的所有反馈？",
+            self, "Clear feedback",
+            f"Clear all feedback for feature {self._current_feature_id}?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
