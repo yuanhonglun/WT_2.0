@@ -534,6 +534,9 @@ class MainWindow(QMainWindow):
             self._notes_dock.deleteLater()
         self._notes_dock = NotesDock(self._feedback_controller, parent=self)
         self.addDockWidget(Qt.RightDockWidgetArea, self._notes_dock)
+        # Notes panel is collapsed by default; open it via the "Notes Panel"
+        # toolbar toggle.
+        self._notes_dock.setVisible(False)
 
         # 4. Status column delegate
         delegate = FeatureStatusDelegate(
