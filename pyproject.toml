@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = [
+    "packages/metabo_core/tests",
+    "packages/metabo_gui/tests",
+    "apps/asfam_processor/tests",
+]
+pythonpath = [
+    "packages/metabo_core",
+    "packages/metabo_gui",
+    "apps/asfam_processor",
+]
+markers = [
+    "slow: long-running tests on real data (skipped unless -m slow)",
+]

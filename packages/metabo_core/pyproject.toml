@@ -1,0 +1,23 @@
+[project]
+name = "metabo-core"
+dynamic = ["version"]
+description = "METRA core — shared metabolomics algorithms (similarity, peak picking, library matching, alignment)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "pandas>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "metabo_core.__version__"}

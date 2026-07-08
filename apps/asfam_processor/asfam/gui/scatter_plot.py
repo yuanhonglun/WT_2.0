@@ -1,0 +1,454 @@
+"""RT x m/z feature overview: heatmap with drag pan, scroll zoom, click-only selection."""
+from __future__ import annotations
+
+import numpy as np
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
+from PyQt5.QtCore import pyqtSignal
+
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from matplotlib.colors import LogNorm
+from matplotlib.patches import Rectangle
+
+from metabo_gui.plot_toolbar import make_plot_toolbar
+from metabo_gui.theme import THEME_BLUE
+
+from asfam.models import Feature
+
+
+class ScatterPlotWidget(QWidget):
+    pointClicked = pyqtSignal(str)
+    filterChanged = pyqtSignal()  # emitted when any checkbox toggles
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.fig = Figure(figsize=(8, 5), dpi=100, facecolor="white")
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = make_plot_toolbar(self.canvas, self, white_icons=True, icon_size=28)
+
+        # Toolbar row with filter combo
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setContentsMargins(0, 0, 0, 0)
+        toolbar_row.setSpacing(4)
+        toolbar_row.addWidget(self.toolbar)
+        lbl = QLabel("Show:")
+        lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
+        toolbar_row.addWidget(lbl)
+        self._chk_ms1 = QCheckBox("MS1-detected")
+        self._chk_ms1.setChecked(True)
+        self._chk_ms1.setStyleSheet("font-size: 10px;")
+        self._chk_ms1.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_ms1)
+        self._chk_ms2 = QCheckBox("MS2-only")
+        self._chk_ms2.setChecked(True)
+        self._chk_ms2.setStyleSheet("font-size: 10px;")
+        self._chk_ms2.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_ms2)
+        self._chk_annotated = QCheckBox("Annotated")
+        self._chk_annotated.setChecked(False)
+        self._chk_annotated.setStyleSheet("font-size: 10px;")
+        self._chk_annotated.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_annotated)
+        # Plan F-followup-5 mirror: feature is "annotated" iff its top
+        # match's score reaches this threshold (defaults to 0.8 to match
+        # the historical pipeline cutoff). Configurable via
+        # ScatterPlotWidget.set_annotated_threshold from main_window.
+        self._annotated_threshold: float = 0.8
+        # High-confidence also requires >= this many matched peaks (set from
+        # config by main_window). 0 = no count constraint.
+        self._annotated_min_matched: int = 0
+        self._chk_duplicates = QCheckBox("Duplicates")
+        self._chk_duplicates.setChecked(False)
+        self._chk_duplicates.setStyleSheet("font-size: 10px;")
+        self._chk_duplicates.toggled.connect(self._on_filter_changed)
+        toolbar_row.addWidget(self._chk_duplicates)
+        layout.addLayout(toolbar_row)
+        layout.addWidget(self.canvas)
+
+        self.setMinimumHeight(200)
+
+        self._features: list[Feature] = []
+        self._highlight_lines = None
+        self._default_xlim = None
+        self._default_ylim = None
+
+        self._drag_active = False
+        self._drag_start = None
+        self._drag_moved = False
+
+        # Right-drag zoom
+        self._zoom_active = False
+        self._zoom_start = None
+        self._zoom_rect = None
+
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+
+    def set_features(self, features: list[Feature]):
+        self._features = features
+        self._draw()
+
+    def _on_filter_changed(self, _checked=None):
+        # Plan F-followup item 1: keep the current viewport when the user
+        # toggles a filter — only the plotted point set should change.
+        self._draw(preserve_view=True)
+        self.filterChanged.emit()
+
+    @property
+    def show_duplicates(self) -> bool:
+        return self._chk_duplicates.isChecked()
+
+    @property
+    def annotated_only(self) -> bool:
+        return self._chk_annotated.isChecked()
+
+    @property
+    def annotated_threshold(self) -> float:
+        return float(self._annotated_threshold)
+
+    def set_annotated_threshold(self, thr: float) -> None:
+        self._annotated_threshold = float(thr)
+        self._draw(preserve_view=True)
+
+    def set_annotated_min_matched(self, n: int) -> None:
+        self._annotated_min_matched = int(n)
+        self._draw(preserve_view=True)
+
+    def _passes_annotated_gate(self, f) -> bool:
+        """A feature counts as annotated iff its selected match clears the
+        score floor AND carries >= ``self._annotated_min_matched`` matched
+        peaks (high-confidence tier; sparse matches are suggestions only).
+        Mirrors the GC-MS gate. Falls back to ``f.name`` truthy for legacy
+        features that pre-date ``annotation_matches`` (saved-project
+        compatibility)."""
+        sel = getattr(f, "selected_annotation", None)
+        if sel is None:
+            return bool(getattr(f, "name", ""))
+        try:
+            if float(sel.score) < self._annotated_threshold:
+                return False
+        except (TypeError, ValueError):
+            return False
+        return int(getattr(sel, "n_matched", 0) or 0) >= self._annotated_min_matched
+
+    # Duplicate type -> line color
+    _DUP_COLORS = {"isotope": "#2196F3", "adduct": "#4CAF50", "isf": "#FF9800", "spectral": "#9C27B0"}
+
+    def highlight_feature(self, feature_id: str):
+        if self._highlight_lines is not None:
+            for artist in self._highlight_lines:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            self._highlight_lines = None
+
+        ax = self.fig.axes[0] if self.fig.axes else None
+        if ax is None:
+            return
+
+        target = None
+        for f in self._features:
+            if f.feature_id == feature_id:
+                target = f
+                break
+        if target is None:
+            return
+
+        artists = []
+
+        # Highlight the selected feature (red circle)
+        artists.extend(ax.plot(
+            target.rt, target.precursor_mz, "o",
+            markersize=16, markerfacecolor="none",
+            markeredgecolor="red", markeredgewidth=2.5, zorder=10,
+        ))
+
+        # If feature belongs to a dedup group, draw connection lines
+        gid = target.duplicate_group_id
+        if gid is not None:
+            group = [f for f in self._features if f.duplicate_group_id == gid]
+            if len(group) > 1:
+                # Find the representative (the one with is_duplicate=False)
+                rep = next((f for f in group if not f.is_duplicate), group[0])
+                color = self._DUP_COLORS.get(target.duplicate_type or rep.duplicate_type, "gray")
+
+                # Mark representative with filled star
+                artists.extend(ax.plot(
+                    rep.rt, rep.precursor_mz, "*",
+                    markersize=18, markerfacecolor=color,
+                    markeredgecolor="black", markeredgewidth=0.5, zorder=11,
+                ))
+
+                # Draw lines from representative to each duplicate
+                for member in group:
+                    if member.feature_id == rep.feature_id:
+                        continue
+                    artists.extend(ax.plot(
+                        [rep.rt, member.rt],
+                        [rep.precursor_mz, member.precursor_mz],
+                        color=color, linewidth=2, alpha=0.7,
+                        linestyle="--", zorder=9,
+                    ))
+                    # Mark duplicate with hollow circle
+                    artists.extend(ax.plot(
+                        member.rt, member.precursor_mz, "o",
+                        markersize=12, markerfacecolor="none",
+                        markeredgecolor=color, markeredgewidth=2, zorder=10,
+                    ))
+
+        self._highlight_lines = artists
+        self.canvas.draw_idle()
+
+    def _draw(self, preserve_view: bool = False):
+        """Re-render the scatter.
+
+        Plan F-followup item 1: when ``preserve_view=True`` the current
+        xlim / ylim are snapshot before redraw and re-applied after, so
+        a filter toggle preserves the spatial relationship between
+        remaining points instead of auto-zooming.
+        """
+        prev_xlim = prev_ylim = None
+        if preserve_view and self.fig.axes:
+            prev_ax = self.fig.axes[0]
+            prev_xlim = prev_ax.get_xlim()
+            prev_ylim = prev_ax.get_ylim()
+
+        # Fully clear figure and recreate axes (prevents colorbar width accumulation)
+        self.fig.clear()
+        ax = self.fig.add_axes([0.08, 0.12, 0.72, 0.82])  # fixed position
+        cax = self.fig.add_axes([0.82, 0.12, 0.03, 0.82])  # fixed colorbar axes
+
+        if not self._features:
+            ax.set_xlabel("RT (min)")
+            ax.set_ylabel("m/z")
+            ax.set_title("No features loaded")
+            cax.set_visible(False)
+            self.canvas.draw()
+            return
+
+        # Apply checkbox filters
+        show_ms1 = self._chk_ms1.isChecked()
+        show_ms2 = self._chk_ms2.isChecked()
+        annotated_only = self._chk_annotated.isChecked()
+        show_duplicates = self._chk_duplicates.isChecked()
+        high = [f for f in self._features if f.signal_type == "ms1_detected"] if show_ms1 else []
+        low = [f for f in self._features if f.signal_type == "ms2_only"] if show_ms2 else []
+        if annotated_only:
+            high = [f for f in high if self._passes_annotated_gate(f)]
+            low = [f for f in low if self._passes_annotated_gate(f)]
+        if not show_duplicates:
+            high = [f for f in high if not f.is_duplicate]
+            low = [f for f in low if not f.is_duplicate]
+
+        visible = high + low
+        if not visible:
+            ax.set_xlabel("RT (min)")
+            ax.set_ylabel("m/z")
+            ax.set_title("No features to display (filter active)")
+            cax.set_visible(False)
+            self.canvas.draw()
+            return
+
+        # For low features, use MS2 total intensity instead of mean_height
+        def get_intensity(f):
+            if f.mean_height > 0:
+                return f.mean_height
+            # Use sum of MS2 intensities
+            if f.ms2_intensity is not None and len(f.ms2_intensity) > 0:
+                return float(np.sum(f.ms2_intensity))
+            return 1.0
+
+        all_intensities = [max(get_intensity(f), 1) for f in visible]
+        vmin = max(min(all_intensities), 10)
+        vmax = max(max(all_intensities), vmin * 2)
+        norm = LogNorm(vmin=vmin, vmax=vmax)
+
+        if high:
+            rt_h = [f.rt for f in high]
+            mz_h = [f.precursor_mz for f in high]
+            int_h = [max(get_intensity(f), 1) for f in high]
+            sizes_h = np.clip(np.log10(np.array(int_h)) * 10, 8, 120)
+            sc = ax.scatter(rt_h, mz_h, s=sizes_h, c=int_h, cmap="YlOrRd",
+                            norm=norm, alpha=0.85, edgecolors="gray", linewidths=0.3,
+                            label=f"MS1 ({len(high)})", zorder=5)
+
+        if low:
+            rt_l = [f.rt for f in low]
+            mz_l = [f.precursor_mz for f in low]
+            int_l = [max(get_intensity(f), 1) for f in low]
+            sizes_l = np.clip(np.log10(np.array(int_l) + 1) * 8, 6, 60)
+            sc_low = ax.scatter(rt_l, mz_l, s=sizes_l, c=int_l, marker="D",
+                                cmap="YlOrRd", norm=norm, alpha=0.6,
+                                edgecolors=THEME_BLUE, linewidths=0.5,
+                                label=f"MS2 ({len(low)})", zorder=4)
+
+        # Colorbar in fixed axes
+        import matplotlib.cm as cm
+        sm = cm.ScalarMappable(cmap="YlOrRd", norm=norm)
+        sm.set_array([])
+        self.fig.colorbar(sm, cax=cax, label="Intensity")
+
+        ax.set_xlabel("RT (min)", fontsize=10)
+        ax.set_ylabel("m/z", fontsize=10)
+        ax.set_title(
+            f"Feature Overview ({len(high)} MS1 + {len(low)} MS2 = {len(visible)}"
+            f" / {len(self._features)} total)",
+            fontsize=11, color=THEME_BLUE,
+        )
+        # matplotlib's default ScalarFormatter switches to an offset
+        # representation when the visible range is small relative to the
+        # mean (zoomed-in m/z otherwise shows "+2.66e2" plus tick labels
+        # like 0.050, 0.055, ...). Force plain absolute tick labels on
+        # both axes so the displayed value always matches the real m/z.
+        ax.ticklabel_format(useOffset=False, style="plain", axis="both")
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+
+        self._default_xlim = ax.get_xlim()
+        self._default_ylim = ax.get_ylim()
+        self._highlight_lines = None
+        # Plan F-followup item 1: restore the previous viewport when a
+        # filter triggered the redraw, so points don't jump on toggle.
+        if prev_xlim is not None:
+            ax.set_xlim(prev_xlim)
+        if prev_ylim is not None:
+            ax.set_ylim(prev_ylim)
+        self.canvas.draw()
+
+    def _get_ax(self):
+        return self.fig.axes[0] if self.fig.axes else None
+
+    # Scroll zoom
+    def _on_scroll(self, event):
+        ax = self._get_ax()
+        if ax is None or event.inaxes != ax:
+            return
+        factor = 0.8 if event.button == "up" else 1.25
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x, y = event.xdata, event.ydata
+        ax.set_xlim(x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor)
+        ax.set_ylim(y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor)
+        self.canvas.draw_idle()
+
+    # Left click: select or drag. Double click: reset view.
+    def _on_press(self, event):
+        ax = self._get_ax()
+        if ax is None or event.inaxes != ax:
+            return
+        if self.toolbar.mode:
+            return
+
+        if event.button == 1:
+            if event.dblclick:
+                if self._default_xlim and self._default_ylim:
+                    ax.set_xlim(self._default_xlim)
+                    ax.set_ylim(self._default_ylim)
+                    self.canvas.draw_idle()
+                return
+            self._drag_active = True
+            self._drag_start = (event.xdata, event.ydata)
+            self._drag_moved = False
+
+        elif event.button == 3:
+            self._zoom_active = True
+            self._zoom_start = (event.xdata, event.ydata)
+            self._zoom_rect = Rectangle(
+                (event.xdata, event.ydata), 0, 0,
+                linewidth=1, edgecolor="red", facecolor="red", alpha=0.15)
+            ax.add_patch(self._zoom_rect)
+
+    def _on_release(self, event):
+        ax = self._get_ax()
+        if event.button == 1:
+            if self._drag_active and not self._drag_moved and ax and event.inaxes == ax:
+                self._select_nearest(event.xdata, event.ydata)
+            self._drag_active = False
+            self._drag_start = None
+
+        elif event.button == 3 and self._zoom_active:
+            self._zoom_active = False
+            if self._zoom_rect:
+                self._zoom_rect.remove()
+                self._zoom_rect = None
+            if self._zoom_start and ax and event.xdata is not None and event.ydata is not None:
+                x0, y0 = self._zoom_start
+                x1, y1 = event.xdata, event.ydata
+                if abs(x1 - x0) > 1e-6:
+                    ax.set_xlim(min(x0, x1), max(x0, x1))
+                if abs(y1 - y0) > 1e-6:
+                    ax.set_ylim(min(y0, y1), max(y0, y1))
+            self._zoom_start = None
+            self.canvas.draw_idle()
+
+    def _on_motion(self, event):
+        ax = self._get_ax()
+
+        # Right-drag zoom rectangle
+        if self._zoom_active and self._zoom_rect and self._zoom_start:
+            if ax and event.inaxes == ax and event.xdata is not None:
+                x0, y0 = self._zoom_start
+                self._zoom_rect.set_xy((min(x0, event.xdata), min(y0, event.ydata)))
+                self._zoom_rect.set_width(abs(event.xdata - x0))
+                self._zoom_rect.set_height(abs(event.ydata - y0))
+                self.canvas.draw_idle()
+            return
+
+        # Left-drag pan
+        if not self._drag_active or ax is None or event.inaxes != ax or self._drag_start is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        dx = self._drag_start[0] - event.xdata
+        dy = self._drag_start[1] - event.ydata
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_range = xlim[1] - xlim[0]
+        y_range = ylim[1] - ylim[0]
+        if abs(dx) > x_range * 0.005 or abs(dy) > y_range * 0.005:
+            self._drag_moved = True
+        if self._drag_moved:
+            ax.set_xlim(xlim[0] + dx, xlim[1] + dx)
+            ax.set_ylim(ylim[0] + dy, ylim[1] + dy)
+            self.canvas.draw_idle()
+
+    def _select_nearest(self, x, y):
+        ax = self._get_ax()
+        if not self._features or x is None or y is None or ax is None:
+            return
+        # Only search visible features
+        show_ms1 = self._chk_ms1.isChecked()
+        show_ms2 = self._chk_ms2.isChecked()
+        annotated_only = self._chk_annotated.isChecked()
+        show_duplicates = self._chk_duplicates.isChecked()
+        visible = []
+        for f in self._features:
+            if f.signal_type == "ms1_detected" and not show_ms1:
+                continue
+            if f.signal_type == "ms2_only" and not show_ms2:
+                continue
+            if annotated_only and not self._passes_annotated_gate(f):
+                continue
+            if not show_duplicates and f.is_duplicate:
+                continue
+            visible.append(f)
+        if not visible:
+            return
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_range = max(xlim[1] - xlim[0], 1e-6)
+        y_range = max(ylim[1] - ylim[0], 1e-6)
+        best = None
+        best_dist = float("inf")
+        for f in visible:
+            d = ((f.rt - x) / x_range) ** 2 + ((f.precursor_mz - y) / y_range) ** 2
+            if d < best_dist:
+                best_dist = d
+                best = f
+        if best and best_dist < 0.003:
+            self.pointClicked.emit(best.feature_id)

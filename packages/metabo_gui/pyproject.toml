@@ -1,0 +1,27 @@
+[project]
+name = "metabo-gui"
+dynamic = ["version"]
+description = "METRA GUI — shared Qt building blocks (theme, canvas mixin, dialogs, IO helpers)"
+requires-python = ">=3.9"
+dependencies = [
+    "metabo-core",
+    "PyQt5>=5.15",
+    "matplotlib>=3.5",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "metabo_core.__version__"}
+
+[tool.setuptools.package-data]
+metabo_gui = ["resources/*.png", "resources/*.csv"]
