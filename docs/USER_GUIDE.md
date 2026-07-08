@@ -253,7 +253,7 @@ The end-to-end pipeline is orchestrated by
 | 2 | **MS1 assignment** | Two-pass, exclusive assignment of MS1 peaks to features with peak-shape scoring, preventing one MS1 peak from being claimed by several features. |
 | 2.5 | **MS2-only inference** | For features with fragment spectra but no MS1 signal, infer the precursor m/z via spectral-library matching and neutral-loss consensus. |
 | 3 | **Segment merge** | Merge features across the acquisition segments into one feature set per sample. |
-| 4 | **Isotope dedup** | Collapse isotopologues using a graph-based method with confidence tiers (MS1 pattern, modified cosine, dual cosine + neutral-loss cosine), gated by strict apex-RT proximity. |
+| 4 | **Isotope dedup** | Collapse isotopologues with a graph-based method: an isotope edge requires strict apex-RT proximity, correlated MS1 EICs, and a Δm/z on a known isotope step (¹³C·n), reinforced by an ASFAM-specific MS2 isotope-step echo — the lighter isotopologue's top fragments reappearing mass-shifted in the heavier one's MS2. |
 | 5 | **Adduct dedup** | Consolidate adducts of the same neutral mass, validated by EIC Pearson correlation. |
 | 5b | **Duplicate detection** | Merge near-identical co-eluting features by cosine similarity. |
 | 6 | **ISF detection** | Flag in-source fragments using the precursor–fragment m/z relationship together with EIC correlation. |
