@@ -1,0 +1,2 @@
+# Keep binary/non-text assets unchanged — no autocrlf normalization.
+*.template binary

@@ -1,0 +1,25 @@
+.worktrees/
+.claude/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+build.log
+*.egg-info/
+.idea/
+
+# Data, libraries, and reference outputs (kept locally, never tracked)
+lib/
+test_data/
+test_results/
+legacy_wtv2_results/
+legacy_asfam_results/
+MS_DIAL_results/
+wtv_2_tools_data/
+bug_report/
+demo_methods/
+docs/ref/
+*.msp
+*.mzML
+*.mzXML
