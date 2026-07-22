@@ -11,7 +11,11 @@ from metabo_core.config import (
     PeakDetectionConfig,
     SimilarityConfig,
     AnnotationConfig,
+    ConfidenceConfig,
     AlignmentConfig,
+    GapFillConfig,
+    JoinerConfig,
+    RefinerConfig,
     lc_ms1_peak_config,
     lc_ms2_peak_config,
     MsdialPeakSpottingConfig,
@@ -293,12 +297,63 @@ class ProcessingConfig:
     isf_ms2_mz_tolerance: float = 0.02  # Da
 
     # -- Stage 7: Cross-replicate alignment --
-    alignment_rt_tolerance: float = 0.1  # min
+    # Peaks are matched on the ion they were quantified on (CandidateFeature.
+    # align_mz), never on the precursor -- ASFAM fragments everything, so the
+    # precursor m/z is a 1-Da isolation window's centroid and drifts with
+    # whatever co-isolated in that sample.
+    #
+    # 0.2 rather than 0.1: measured cross-sample RT drift has a p90 of 0.13-0.19
+    # min, so +/-0.1 covered only 85-89% of same-compound pairs. It also widens
+    # the gap filler's peak-top search, which is deliberate and is what MS-DIAL
+    # does (LcmsGapFiller._rtTol = RetentionTimeAlignmentTolerance). It does NOT
+    # widen the refiner's redundancy gate: RefinerConfig.rt_tolerance_cap pins
+    # that at 0.1 -> a 0.05 min gate. Do not remove that cap.
+    alignment_rt_tolerance: float = 0.2  # min
+    # Not tightened to 0.01: measured, that makes the row count go *up*
+    # (rice +11.4%, cancer +8.3%). The key was the problem, not the window.
     alignment_mz_tolerance: float = 0.02  # Da
-    alignment_mz_weight: float = 0.5
-    alignment_rt_weight: float = 0.5
+    # The three claim-score weights sum to 1. 0.3/0.3/0.4 reproduces the blend
+    # the Hungarian-era scorer used for PRODUCT peaks. MS1-route matching is
+    # geometry-only because its AIF spectrum is not precursor-specific; there
+    # the m/z/RT terms renormalize to 0.5/0.5.
+    alignment_mz_weight: float = 0.3
+    alignment_rt_weight: float = 0.3
+    alignment_ms2_weight: float = 0.4
+    # PRODUCT-route MS2 identity gate on the alignment box. Two product peaks
+    # share a box only if their spectra cannot tell them apart. Without it the
+    # box is pure proximity, and
+    # proximity is what the build step used to forbid a peak from founding a
+    # master of its own -- while a sample may put only one peak in a master. The
+    # surplus peaks ended up in no row and no cell: 1,242 (rice) / 2,026 (cancer)
+    # of them a *different compound* from the peak that beat them. 0 disables it.
+    alignment_ms2_identity_threshold: float = 0.5
+    # Fewer fragments than this and the cosine is not evidence; the gate abstains
+    # and the pair stays in one box. Abstaining must suppress, not split, or every
+    # fragment-poor peak gets a row of its own.
+    alignment_ms2_identity_min_fragments: int = 3
+    # Total fragment counts alone are insufficient: both spectra may be rich yet
+    # share only one ubiquitous ion.  Identity requires this many actual pairs.
+    alignment_ms2_identity_min_matched_fragments: int = 3
+    # Sample that seeds the master list. None = pick automatically by S/N quality.
+    # After the union master list this only decides who claims a bucket first.
+    alignment_reference_sample: Optional[str] = None
+    # MS2 cosine at or above which a visible product-route (ms2_only) row and a
+    # visible MS1-route row at the same RT are one compound -> the product row is
+    # marked "ms1_covered" and stops counting as an MS2-only detection. The two
+    # rows have no comparable m/z (precursor vs fragment), so MS2 is the only
+    # route-independent identity signal there is. Read only by stage 7: it must
+    # stay in spill._FINGERPRINT_EXCLUDED or every _work/ checkpoint is voided.
+    #
+    # Not the joiner's alignment_ms2_identity_threshold above: that one asks
+    # whether two PRODUCT peaks in one box are the same compound, this one
+    # whether an MS1 row already covers a product row. Same instrument,
+    # different questions, and they were tuned on different evidence.
+    alignment_ms1_covered_threshold: float = 0.7
     gap_fill_enabled: bool = True
     gap_fill_rt_expansion: float = 1.5
+    # Fragment chromatograms stored per spot in alignment.eic, taken from the
+    # representative sample. Only the MS2 panel of the EIC viewer reads them.
+    eic_store_top_fragments: int = 10
 
     # -- Annotation reranker (optional, default disabled) --
     reranker_enabled: bool = False
@@ -490,4 +545,96 @@ class ProcessingConfig:
             mz_weight=self.alignment_mz_weight,
             rt_weight=self.alignment_rt_weight,
             ms2_mz_tolerance=self.eic_mz_tolerance,
+        )
+
+    def joiner_view(self) -> JoinerConfig:
+        return JoinerConfig(
+            rt_tolerance=self.alignment_rt_tolerance,
+            mz_tolerance=self.alignment_mz_tolerance,
+            mz_weight=self.alignment_mz_weight,
+            rt_weight=self.alignment_rt_weight,
+            ms2_weight=self.alignment_ms2_weight,
+            ms2_mz_tolerance=self.eic_mz_tolerance,
+            ms2_identity_threshold=self.alignment_ms2_identity_threshold,
+            ms2_identity_min_fragments=max(
+                3, int(self.alignment_ms2_identity_min_fragments),
+            ),
+            ms2_identity_min_matched_fragments=(
+                max(3, int(self.alignment_ms2_identity_min_matched_fragments))
+            ),
+            # Correctness invariants, deliberately not GUI-disableable.  These
+            # opt ASFAM into new shared-core behaviour while DDA keeps defaults.
+            use_reliable_ms2_identity=True,
+            conserve_detected_peaks=True,
+            # AIF spectra belong to a whole co-eluting segment, so their
+            # cross-sample variation cannot veto an MS1 chromatographic peak.
+            # PRODUCT spectra remain identity-gated in the shared joiner.
+            use_ms2_identity_for_ms1=False,
+            reference_sample=self.alignment_reference_sample,
+        )
+
+    def gap_fill_view(self) -> GapFillConfig:
+        """Tolerances of the chromatograms the *detected* peaks were measured on.
+
+        ``ms1_mz_tolerance`` and ``product_mz_tolerance`` are not free knobs: the
+        first is the window ``msdial_ms1_features._recalculate`` re-integrates a
+        detected MS1 peak in, the second is the slice ``build_slice_eics_sum``
+        summed to give a fragment its intensity. A filled value has to come off
+        the same window as the detected values it will sit beside.
+        """
+        return GapFillConfig(
+            rt_tolerance=self.alignment_rt_tolerance,
+            ms1_mz_tolerance=self.msdial_peak.centroid_ms1_tolerance,
+            product_mz_tolerance=self.msdial_peak.mass_slice_width,
+            smoothing_level=self.msdial_peak.smoothing_level,
+            rt_expansion=self.gap_fill_rt_expansion,
+        )
+
+    def refiner_view(self) -> RefinerConfig:
+        """Gates for the post-alignment redundancy pass, narrowed from the join's.
+
+        The refiner caps and halves the RT tolerance itself, so passing the raw
+        alignment tolerance is correct — see :class:`RefinerConfig`.
+
+        ``ms2_mz_tolerance`` is the joiner's, deliberately: the two passes score
+        the same pair of spectra and must not disagree about what a matched
+        fragment is.
+        """
+        return RefinerConfig(
+            rt_tolerance=self.alignment_rt_tolerance,
+            mz_tolerance=self.alignment_mz_tolerance,
+            ms2_identity_threshold=self.alignment_ms1_covered_threshold,
+            ms2_mz_tolerance=self.eic_mz_tolerance,
+            same_route_redundancy=False,
+            use_reliable_ms2_identity=True,
+            ms2_identity_min_fragments=max(
+                3, int(self.alignment_ms2_identity_min_fragments),
+            ),
+            ms2_identity_min_matched_fragments=(
+                max(3, int(self.alignment_ms2_identity_min_matched_fragments))
+            ),
+            same_route_ms2_identity_threshold=(
+                self.alignment_ms2_identity_threshold
+            ),
+            visible_keepers_only=True,
+            require_product_window_match=True,
+            require_cross_route_window_match=True,
+            preserve_cross_route_unique_detections=True,
+        )
+
+    def confidence_view(self) -> ConfidenceConfig:
+        """What "annotated" means, for the one predicate that decides it.
+
+        Read by the ``annotated`` column of ``features.csv`` and by the refiner's
+        placement order. Both go through
+        :func:`metabo_core.annotation.is_high_confidence`; nothing else may
+        re-derive this.
+        """
+        return ConfidenceConfig(
+            score_threshold=float(
+                getattr(self, "matchms_similarity_threshold", 0.3) or 0.0
+            ),
+            min_matched_peaks=int(
+                getattr(self, "matchms_min_matched_peaks", 3) or 0
+            ),
         )

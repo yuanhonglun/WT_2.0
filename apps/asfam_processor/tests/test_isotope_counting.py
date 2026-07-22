@@ -2,7 +2,7 @@
 
 PR-D makes every isotope peak (M / M+1 / M+2 ...) count as an independent
 feature, per the MS-DIAL convention. Stage 4 already *marks-and-keeps* the
-non-monoisotopic members (``status="isotope_removed"``, ``is_duplicate=True``,
+non-monoisotopic members (``status="isotope_excluded"``, ``is_duplicate=True``,
 shared ``isotope_group_id``) instead of deleting them. Task D1 adds the
 ``isotope_index`` label: ``0`` for the monoisotopic representative, ``n`` for
 the M+n member (``round(delta_mz / C13_DELTA)``).
@@ -140,10 +140,10 @@ def test_isotope_representative_kept_others_removed_but_retained():
     assert f_m.is_duplicate is False
     assert f_m.status == "active"
 
-    # Non-representatives: flagged duplicate + isotope_removed, with M+n index.
+    # Non-representatives: flagged duplicate + isotope_excluded, with M+n index.
     for feat, expected_index in ((f_m1, 1), (f_m2, 2)):
         assert feat.is_duplicate is True
-        assert feat.status == "isotope_removed"
+        assert feat.status == "isotope_excluded"
         assert feat.isotope_index == expected_index
 
     # All three survive in the returned replicate list (mark-and-keep, not

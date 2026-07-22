@@ -27,6 +27,7 @@ import numpy as np
 from asfam.config import ProcessingConfig
 from asfam.models import Feature
 from metabo_core import __version__ as METRA_VERSION
+from metabo_core.annotation import is_high_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -106,15 +107,15 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
     ``annotated`` 不再被用作导出过滤; 仅作 GUI 标记。
     """
     rows = []
-    display_thr = float(
-        getattr(config, "matchms_similarity_threshold", 0.3) or 0.0
-    )
-    # High-confidence (MS-DIAL IsReferenceMatched) also requires >= this many
-    # matched peaks. Annotation now emits sub-threshold hits as suggestions
-    # (name + score present) which must come out annotated=False.
-    high_conf_min = int(getattr(config, "matchms_min_matched_peaks", 3) or 0)
+    # High-confidence (MS-DIAL IsReferenceMatched): the score must clear the
+    # display floor AND the match must have >= matchms_min_matched_peaks matched
+    # peaks. Annotation emits sub-threshold hits as suggestions (name + score
+    # present) which must come out annotated=False. Stage 7's refiner orders its
+    # placement loops by the same predicate, so it lives in metabo_core rather
+    # than here — two copies would drift and no test would notice.
+    confidence = config.confidence_view()
 
-    # 全集样品 ID (跨 features 求并集), 缺样 -> 空字符串 (不是 0)。
+    # 全集样品 ID (跨 features 求并集)。
     rep_keys: list = []
     seen: set = set()
     for feat in features:
@@ -126,15 +127,7 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
 
     for f in features:
         sel = f.selected_annotation
-        # Two-tier: score must clear the display floor AND the match must have
-        # >= high_conf_min matched peaks. A sparse "suggested" hit (fewer peaks)
-        # keeps its name/score cells but is annotated=False.
-        annotated = (
-            sel is not None
-            and sel.score is not None
-            and float(sel.score) >= display_thr
-            and int(getattr(sel, "n_matched", 0) or 0) >= high_conf_min
-        )
+        annotated = is_high_confidence(f, confidence)
 
         # W10 公共列前缀
         row = {
@@ -159,6 +152,16 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         # ASFAM 专有字段 (保留 mean_*/cv/sn_ratio/score 细分等)
         row["precursor_mz"] = round(f.precursor_mz, 5)
         row["rt_min"] = round(f.rt, 3)
+        row["alignment_mz"] = round(f.align_mz, 5) if f.align_mz is not None else ""
+        row["representative_rt"] = (
+            round(f.representative_rt, 3) if f.representative_rt is not None else ""
+        )
+        row["alignment_window"] = (
+            f.alignment_window if f.alignment_window is not None else ""
+        )
+        row["alignment_segment"] = f.alignment_segment
+        row["alignment_relation"] = f.alignment_relation
+        row["alignment_related_feature_id"] = f.alignment_related_feature_id
         row["rt_left"] = round(f.rt_left, 3)
         row["rt_right"] = round(f.rt_right, 3)
         row["signal_type"] = f.signal_type
@@ -169,6 +172,12 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         row["mean_area"] = round(f.mean_area, 1)
         row["cv"] = round(f.cv, 3)
         row["sn_ratio"] = round(f.sn_ratio, 1)
+        # PR-6: how many samples the peak was actually *picked* in, over all
+        # samples in the run. Since gap filling there is no other way to tell —
+        # every height_rep* cell is non-empty now, whether it was detected,
+        # filled, or filled with nothing.
+        row["n_detected"] = int(f.n_detected)
+        row["detection_rate"] = round(f.detection_rate, 3)
         row["gaussian_similarity"] = round(f.gaussian_similarity, 3)
         # MS-DIAL 对齐的分项列（便于与 MS-DIAL 导出列逐项对比）。
         # composite_score == total_score（都 = AnnotationMatch.score）；composite_score
@@ -185,16 +194,17 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         row["annotated"] = bool(annotated)
         row["ms2_spectrum"] = f.ms2_as_str()
 
-        # 缺样填空字符串 (非 0), 列结构在所有行间一致。
+        # 定量矩阵不留空格: 一个读表的人无法区分「空白」是缺样品还是缺信号，
+        # 而 pandas 会把整列读成 object。gap fill 之后每个 spot 的每个样品都有
+        # 一个峰，所以这里的 0 只在 gap_fill_enabled=False 时才会出现，
+        # 此时同行的 gap_fill_status_rep{i} 为空串，表示这个 0 是占位而非测量值。
         for rep_id in rep_keys:
-            if rep_id in f.heights:
-                row[f"height_rep{rep_id}"] = round(f.heights[rep_id], 1)
-            else:
-                row[f"height_rep{rep_id}"] = ""
-            if rep_id in f.areas:
-                row[f"area_rep{rep_id}"] = round(f.areas[rep_id], 1)
-            else:
-                row[f"area_rep{rep_id}"] = ""
+            row[f"height_rep{rep_id}"] = round(f.heights.get(rep_id, 0.0), 1)
+            row[f"area_rep{rep_id}"] = round(f.areas.get(rep_id, 0.0), 1)
+            # detected / filled / no_signal — 唯一能把定量矩阵里的检出值与
+            # 填充值分开的列。mean_height / cv / sn_ratio / n_detected 只数
+            # detected，height_rep{i} 三种都收。
+            row[f"gap_fill_status_rep{rep_id}"] = f.gap_fill_status.get(rep_id, "")
 
         rows.append(row)
 

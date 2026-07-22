@@ -235,6 +235,10 @@ def _process_segment_ms1(
             ms2_intensity=ms2_intensity,
             n_fragments=n_frags,
             ms1_precursor_mz=hit.mz_centroid,
+            # The mass-slice finder recalculates height/area on a
+            # +/-centroid_ms1_tolerance SUM chromatogram around this very
+            # centroid, so precursor and quant ion coincide here.
+            ms1_quant_mz=hit.mz_centroid,
             ms1_height=hit.height,
             ms1_area=hit.area,
             ms1_sn=hit.sn_ratio,

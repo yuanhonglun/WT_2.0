@@ -31,14 +31,20 @@ def run_stage6b_annotation(
     spectral_library_path: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
     preloaded_library: Optional[list] = None,
+    library_index: Optional[dict] = None,
 ) -> dict[str, list[CandidateFeature]]:
-    if not spectral_library_path and not preloaded_library:
+    if not spectral_library_path and not preloaded_library and library_index is None:
         logger.info("Stage 6.5: No library provided, skipping annotation.")
         return features_by_replicate
 
     logger.info("Stage 6.5: Library annotation...")
 
-    if preloaded_library is not None:
+    # ``library_index`` is the per-sample loop's entry point: building the CSR
+    # index costs ~28 s on lib/lcms/pos.msp, so the orchestrator builds it once
+    # and hands the same dict to every sample.
+    if library_index is not None:
+        library = library_index
+    elif preloaded_library is not None:
         library = build_index_from_list(preloaded_library)
     else:
         library = load_and_index_library(spectral_library_path)
@@ -47,6 +53,7 @@ def run_stage6b_annotation(
 
     mz_index = library["index"]
     spectra = library["spectra"]
+    csr = library.get("csr")
 
     annotation_cfg = config.annotation_view()
     annotation_cfg.top_n = TOP_N
@@ -57,16 +64,21 @@ def run_stage6b_annotation(
     total_matched = 0
     total_features = 0
     for rep_id, features in features_by_replicate.items():
-        active = [f for f in features if f.status == "active"]
+        # Every feature is annotated, including the ones the dedup stages moved
+        # out of their own candidate set ("*_excluded"). ``status`` gates dedup,
+        # not annotation; the score-floor guard below is what keeps a weak name
+        # from leaking onto a duplicate.
+        to_annotate = list(features)
         n_matched = 0
-        for i, feat in enumerate(active):
+        for i, feat in enumerate(to_annotate):
             if progress_callback and i % 100 == 0:
                 progress_callback(
-                    "stage6b", i, len(active),
-                    f"Rep {rep_id}: annotating {i}/{len(active)}",
+                    "stage6b", i, len(to_annotate),
+                    f"Rep {rep_id}: annotating {i}/{len(to_annotate)}",
                 )
             matches = match_feature_topn(
-                feat, spectra, mz_index, annotation_cfg, similarity_cfg, top_n=TOP_N,
+                feat, spectra, mz_index, annotation_cfg, similarity_cfg,
+                top_n=TOP_N, csr=csr,
             )
             if matches:
                 if reranker is not None:
@@ -88,13 +100,12 @@ def run_stage6b_annotation(
                     if result.explanations:
                         feat.annotation_explanations = result.explanations
                 best = matches[0]
-                # Score-floor guard for restored duplicates (T4/T5 merge).
-                # Dedup-removed features (is_duplicate) are restored to active
-                # BEFORE this stage so they can be annotated; but a weak/wrong
+                # Score-floor guard for duplicates (T4/T5 merge). Dedup-flagged
+                # features are annotated like any other, but a weak/wrong
                 # library hit that only passes the count gate (n_matched /
-                # matched_pct) must not leak a name back onto them. Require the
+                # matched_pct) must not leak a name onto them. Require the
                 # best match to clear the display-confidence floor
-                # (matchms_similarity_threshold, 0.7) before re-annotating a
+                # (matchms_similarity_threshold, 0.7) before annotating a
                 # duplicate. Non-duplicate features keep the "emit any hit"
                 # behavior — their display gate is applied later at export/GUI.
                 if (feat.is_duplicate
@@ -112,11 +123,11 @@ def run_stage6b_annotation(
                 feat.annotation_matches = []
 
         total_matched += n_matched
-        total_features += len(active)
+        total_features += len(to_annotate)
         logger.info(
             "  Replicate %s: %d/%d annotated (%.1f%%)",
-            rep_id, n_matched, len(active),
-            n_matched / max(len(active), 1) * 100,
+            rep_id, n_matched, len(to_annotate),
+            n_matched / max(len(to_annotate), 1) * 100,
         )
 
     logger.info("  Total: %d/%d features annotated", total_matched, total_features)

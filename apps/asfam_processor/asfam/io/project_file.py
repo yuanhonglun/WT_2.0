@@ -27,17 +27,21 @@ def save_project(
     library_path: Optional[str] = None,
     stage_stats: Optional[dict] = None,
     candidates_by_rep: Optional[dict] = None,
+    work_dir: Optional[str] = None,
 ) -> None:
     """Save project to .asfam file (pickle-based).
 
-    Saves: config, features, file paths, stats, and optionally
-    per-replicate candidate features for detailed inspection.
+    Saves: config, features, file paths, stats, and a pointer to the ``_work``
+    spill directory holding the per-sample candidates. ``candidates_by_rep``
+    embeds them inline instead; the pipeline stopped doing that when the spill
+    landed, but old project files still carry them.
     """
     project = {
         "version": PROJECT_VERSION,
         "config": asdict(config),
         "mzml_paths": mzml_paths,
         "library_path": library_path,
+        "work_dir": work_dir,
         "stage_stats": stage_stats or {},
         "features": _features_to_dicts(features),
     }
@@ -86,6 +90,7 @@ def load_project(path: str) -> dict:
         "features": features,
         "mzml_paths": project.get("mzml_paths", []),
         "library_path": project.get("library_path"),
+        "work_dir": project.get("work_dir"),
         "stage_stats": project.get("stage_stats", {}),
     }
 
@@ -103,6 +108,39 @@ def load_project(path: str) -> dict:
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
+# Every field of AnnotationMatch, in declaration order. Both Feature and
+# CandidateFeature archive their matches through the two helpers below, so a
+# field added to the dataclass only has to be listed here once.
+_ANNOTATION_MATCH_FIELDS = (
+    "rank", "name", "formula", "score", "n_matched",
+    "ref_peaks", "ref_precursor_mz", "adduct",
+    "wdp", "sdp", "rdp", "matched_pct", "total_score",
+)
+
+
+def _annotation_matches_to_dicts(matches: list) -> list[dict]:
+    """Serialize AnnotationMatch objects, all fields."""
+    return [
+        {name: getattr(m, name) for name in _ANNOTATION_MATCH_FIELDS}
+        for m in matches
+    ]
+
+
+def _dicts_to_annotation_matches(dicts: list[dict]) -> list:
+    """Rebuild AnnotationMatch objects from dicts.
+
+    Keys absent from an older project file fall back to the dataclass
+    defaults (``matched_pct`` / ``total_score`` were only archived from
+    v1.0.260709 on); unknown keys are ignored rather than raising.
+    """
+    from asfam.models import AnnotationMatch
+    return [
+        AnnotationMatch(**{k: v for k, v in d.items()
+                           if k in _ANNOTATION_MATCH_FIELDS})
+        for d in dicts
+    ]
+
+
 def _features_to_dicts(features: list[Feature]) -> list[dict]:
     """Convert Feature objects to serializable dicts."""
     result = []
@@ -119,6 +157,10 @@ def _features_to_dicts(features: list[Feature]) -> list[dict]:
             "n_fragments": f.n_fragments,
             "heights": f.heights,
             "areas": f.areas,
+            "gap_fill_status": f.gap_fill_status,
+            "n_detected": f.n_detected,
+            "detection_rate": f.detection_rate,
+            "charge_state": f.charge_state,
             "mean_height": f.mean_height,
             "mean_area": f.mean_area,
             "cv": f.cv,
@@ -130,6 +172,12 @@ def _features_to_dicts(features: list[Feature]) -> list[dict]:
             "gaussian_similarity": f.gaussian_similarity,
             "ms1_isotopes": f.ms1_isotopes,
             "height_ion_mz": f.height_ion_mz,
+            "align_mz": f.align_mz,
+            "representative_rt": f.representative_rt,
+            "alignment_window": f.alignment_window,
+            "alignment_segment": f.alignment_segment,
+            "alignment_relation": f.alignment_relation,
+            "alignment_related_feature_id": f.alignment_related_feature_id,
             "mz_source": f.mz_source,
             "mz_confidence": f.mz_confidence,
             "detection_source": f.detection_source,
@@ -142,14 +190,7 @@ def _features_to_dicts(features: list[Feature]) -> list[dict]:
             "isotope_group_id": f.isotope_group_id,
             "adduct_group_id": f.adduct_group_id,
             # Annotation matches (top N)
-            "annotation_matches": [
-                {"rank": m.rank, "name": m.name, "formula": m.formula,
-                 "score": m.score, "n_matched": m.n_matched,
-                 "ref_peaks": m.ref_peaks, "ref_precursor_mz": m.ref_precursor_mz,
-                 "adduct": m.adduct,
-                 "wdp": m.wdp, "sdp": m.sdp, "rdp": m.rdp}
-                for m in f.annotation_matches
-            ],
+            "annotation_matches": _annotation_matches_to_dicts(f.annotation_matches),
             "selected_annotation_idx": f.selected_annotation_idx,
         }
         result.append(d)
@@ -172,6 +213,10 @@ def _dicts_to_features(dicts: list[dict]) -> list[Feature]:
             n_fragments=d["n_fragments"],
             heights=d.get("heights", {}),
             areas=d.get("areas", {}),
+            gap_fill_status=d.get("gap_fill_status", {}),
+            n_detected=d.get("n_detected", 0),
+            detection_rate=d.get("detection_rate", 0.0),
+            charge_state=d.get("charge_state"),
             mean_height=d.get("mean_height", 0.0),
             mean_area=d.get("mean_area", 0.0),
             cv=d.get("cv", 0.0),
@@ -183,6 +228,14 @@ def _dicts_to_features(dicts: list[dict]) -> list[Feature]:
             gaussian_similarity=d.get("gaussian_similarity", 0.0),
             ms1_isotopes=d.get("ms1_isotopes"),
             height_ion_mz=d.get("height_ion_mz"),
+            align_mz=d.get("align_mz"),
+            representative_rt=d.get("representative_rt"),
+            alignment_window=d.get("alignment_window"),
+            alignment_segment=d.get("alignment_segment", ""),
+            alignment_relation=d.get("alignment_relation", ""),
+            alignment_related_feature_id=d.get(
+                "alignment_related_feature_id", "",
+            ),
             mz_source=d.get("mz_source", ""),
             mz_confidence=d.get("mz_confidence", ""),
             detection_source=d.get("detection_source", "ms2_driven"),
@@ -204,7 +257,7 @@ def _dicts_to_features(dicts: list[dict]) -> list[Feature]:
         from asfam.models import AnnotationMatch
         am_data = d.get("annotation_matches", [])
         if am_data:
-            f.annotation_matches = [AnnotationMatch(**m) for m in am_data]
+            f.annotation_matches = _dicts_to_annotation_matches(am_data)
             f.selected_annotation_idx = d.get("selected_annotation_idx", 0)
         else:
             # Backward compatibility: convert old _ref_spectrum format
@@ -239,12 +292,17 @@ def _candidates_to_dicts(candidates: list[CandidateFeature]) -> list[dict]:
             "ms2_gaussian": c.ms2_gaussian.tolist() if c.ms2_gaussian is not None else None,
             "ms2_rep_ion_mz": c.ms2_rep_ion_mz,
             "ms1_precursor_mz": c.ms1_precursor_mz,
+            "ms1_quant_mz": c.ms1_quant_mz,
+            "gap_fill_status": c.gap_fill_status,
             "ms1_height": c.ms1_height,
             "ms1_area": c.ms1_area,
             "ms1_sn": c.ms1_sn,
             "ms1_gaussian": c.ms1_gaussian,
             "ms1_isotopes": c.ms1_isotopes,
             "signal_type": c.signal_type,
+            "ms2_quality": c.ms2_quality,
+            "n_correlated_ms2": c.n_correlated_ms2,
+            "charge_state": c.charge_state,
             "inferred_mz": c.inferred_mz,
             "inferred_formula": c.inferred_formula,
             "matchms_score": c.matchms_score,
@@ -263,14 +321,7 @@ def _candidates_to_dicts(candidates: list[CandidateFeature]) -> list[dict]:
             "duplicate_group_id": c.duplicate_group_id,
             "duplicate_type": c.duplicate_type,
             # Annotation matches (top N)
-            "annotation_matches": [
-                {"rank": m.rank, "name": m.name, "formula": m.formula,
-                 "score": m.score, "n_matched": m.n_matched,
-                 "ref_peaks": m.ref_peaks, "ref_precursor_mz": m.ref_precursor_mz,
-                 "adduct": m.adduct,
-                 "wdp": m.wdp, "sdp": m.sdp, "rdp": m.rdp}
-                for m in c.annotation_matches
-            ],
+            "annotation_matches": _annotation_matches_to_dicts(c.annotation_matches),
             "selected_annotation_idx": c.selected_annotation_idx,
         }
         result.append(d)
@@ -296,12 +347,17 @@ def _dicts_to_candidates(dicts: list[dict]) -> list[CandidateFeature]:
             ms2_gaussian=np.array(d["ms2_gaussian"], dtype=np.float64) if d.get("ms2_gaussian") is not None else None,
             ms2_rep_ion_mz=d.get("ms2_rep_ion_mz"),
             ms1_precursor_mz=d.get("ms1_precursor_mz"),
+            ms1_quant_mz=d.get("ms1_quant_mz"),
+            gap_fill_status=d.get("gap_fill_status", "detected"),
             ms1_height=d.get("ms1_height"),
             ms1_area=d.get("ms1_area"),
             ms1_sn=d.get("ms1_sn"),
             ms1_gaussian=d.get("ms1_gaussian"),
             ms1_isotopes=d.get("ms1_isotopes"),
             signal_type=d.get("signal_type", "ms1_detected"),
+            ms2_quality=d.get("ms2_quality", ""),
+            n_correlated_ms2=d.get("n_correlated_ms2", 0),
+            charge_state=d.get("charge_state"),
             inferred_mz=d.get("inferred_mz"),
             inferred_formula=d.get("inferred_formula"),
             matchms_score=d.get("matchms_score"),
@@ -329,7 +385,7 @@ def _dicts_to_candidates(dicts: list[dict]) -> list[CandidateFeature]:
         from asfam.models import AnnotationMatch
         am_data = d.get("annotation_matches", [])
         if am_data:
-            c.annotation_matches = [AnnotationMatch(**m) for m in am_data]
+            c.annotation_matches = _dicts_to_annotation_matches(am_data)
             c.selected_annotation_idx = d.get("selected_annotation_idx", 0)
         else:
             ref_spec = d.get("_ref_spectrum")

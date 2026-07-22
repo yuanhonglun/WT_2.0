@@ -9,6 +9,7 @@ from pathlib import Path
 from asfam import __version__
 from asfam.config import ProcessingConfig
 from asfam.pipeline.orchestrator import PipelineOrchestrator
+from metabo_gui.logging_setup import quiet_noisy_libraries
 
 
 def main() -> None:
@@ -55,6 +56,7 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    quiet_noisy_libraries()
 
     # Load or create config
     if args.config:

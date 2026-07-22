@@ -187,3 +187,84 @@ def test_isf_rt_tolerance_default_and_round_trip(tmp_path):
     cfg.save(p)
     restored = ProcessingConfig.load(p)
     assert restored.isf_rt_tolerance == 0.03
+
+
+def test_refiner_view_caps_the_rt_gate_however_wide_the_join_is():
+    """The redundancy gate is 0.05 min and a user cannot widen it from the GUI.
+
+    ``alignment_rt_tolerance`` is the *join* window, and it is already 0.2 —
+    double MS-DIAL's — because the real cross-sample RT jitter needs it. The
+    refiner is a different question: two spots have to be much closer than the
+    match window to be one compound split in two. ``rt_tolerance_cap`` is the only
+    thing holding those apart, so widening the join must not drag the redundancy
+    gate along with it and start merging distinct compounds.
+    """
+    cfg = ProcessingConfig()
+    cfg.alignment_rt_tolerance = 0.5
+    assert cfg.refiner_view().rt_gate == 0.05
+
+    cfg.alignment_rt_tolerance = 0.02      # below the cap, it still halves
+    assert cfg.refiner_view().rt_gate == 0.01
+
+
+def test_refiner_view_carries_the_ms2_identity_gate(tmp_path):
+    """The cross-route gate, and the fragment tolerance it scores with.
+
+    ``ms2_mz_tolerance`` is the joiner's on purpose: both passes score the same
+    pair of spectra, and they must not disagree about what a matched fragment is.
+    """
+    cfg = ProcessingConfig()
+    assert cfg.refiner_view().ms2_identity_threshold == cfg.alignment_ms1_covered_threshold
+    assert cfg.refiner_view().ms2_mz_tolerance == cfg.eic_mz_tolerance
+
+    cfg.alignment_ms1_covered_threshold = 0.8
+    p = tmp_path / "cfg.json"
+    cfg.save(p)
+    assert ProcessingConfig.load(p).refiner_view().ms2_identity_threshold == 0.8
+
+
+def test_asfam_explicitly_enables_alignment_correctness_mechanisms():
+    cfg = ProcessingConfig()
+    joiner = cfg.joiner_view()
+    refiner = cfg.refiner_view()
+
+    assert joiner.use_reliable_ms2_identity
+    assert joiner.conserve_detected_peaks
+    assert not joiner.use_ms2_identity_for_ms1
+    assert not refiner.same_route_redundancy  # handled pre-gap-fill by ASFAM
+    assert refiner.use_reliable_ms2_identity
+    assert refiner.visible_keepers_only
+    assert refiner.require_product_window_match
+    assert refiner.require_cross_route_window_match
+    assert refiner.preserve_cross_route_unique_detections
+
+
+def test_shared_alignment_correctness_defaults_remain_legacy():
+    from metabo_core.config import JoinerConfig, RefinerConfig
+
+    joiner = JoinerConfig()
+    refiner = RefinerConfig()
+    assert not joiner.use_reliable_ms2_identity
+    assert not joiner.conserve_detected_peaks
+    assert joiner.use_ms2_identity_for_ms1
+    assert refiner.same_route_redundancy
+    assert not refiner.use_reliable_ms2_identity
+    assert not refiner.visible_keepers_only
+    assert not refiner.require_product_window_match
+    assert not refiner.require_cross_route_window_match
+    assert not refiner.preserve_cross_route_unique_detections
+
+
+def test_asfam_identity_fragment_floor_cannot_be_loaded_below_three(tmp_path):
+    cfg = ProcessingConfig()
+    cfg.alignment_ms2_identity_min_fragments = 1
+    cfg.alignment_ms2_identity_min_matched_fragments = 1
+    path = tmp_path / "unsafe.json"
+    cfg.save(path)
+
+    restored = ProcessingConfig.load(path)
+
+    assert restored.joiner_view().ms2_identity_min_fragments == 3
+    assert restored.joiner_view().ms2_identity_min_matched_fragments == 3
+    assert restored.refiner_view().ms2_identity_min_fragments == 3
+    assert restored.refiner_view().ms2_identity_min_matched_fragments == 3

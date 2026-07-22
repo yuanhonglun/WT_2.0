@@ -4,6 +4,20 @@ Algorithmic core extracted from ASFAM stage 7. The core only consumes shared
 ``CandidateFeature`` lists and an ``AlignmentConfig``; it has no dependency on
 ASFAM raw-segment data or EIC extraction. ASFAM stage glue handles progress
 reporting and any acquisition-specific gap filling.
+
+Two things live here and they have opposite futures:
+
+* ``align_features_across_replicates`` is **deprecated**. Its master list is
+  seeded from the reference replicate and never appended to, so every feature
+  unique to a non-reference replicate is dropped without a word (34% of them on
+  ASFAM's rice data). ``metabo_core.alignment.joiner.join_features`` replaces it
+  with MS-DIAL's union master list. ASFAM moved in v1.0.260709.6; DDA can opt in
+  via ``AlignmentConfig.use_union_master`` and will default to it once its
+  results have been validated against ``MS_DIAL_results/dda/``. Delete this
+  function when DDA's default flips — no runtime ``DeprecationWarning`` until
+  then, since it is still the path DDA takes on every run.
+* ``reference_replicate_quality`` is **not** deprecated. It is in active service
+  in all three apps (the joiner, DDA and GC-MS all import it) and stays.
 """
 from __future__ import annotations
 
@@ -87,7 +101,14 @@ def align_features_across_replicates(
     features_by_replicate: dict[str, list[CandidateFeature]],
     config: AlignmentConfig,
 ) -> list[Feature]:
-    """Align candidate features across replicates and assemble final features."""
+    """Align candidate features across replicates and assemble final features.
+
+    .. deprecated::
+       Use ``metabo_core.alignment.joiner.join_features``. The master list below
+       is seeded only from the reference replicate (``aligned`` is never appended
+       to), so a feature detected in no other replicate cannot reach the output.
+       Kept because DDA still defaults to it; see this module's docstring.
+    """
     rep_ids = sorted(features_by_replicate.keys())
     if not rep_ids:
         return []

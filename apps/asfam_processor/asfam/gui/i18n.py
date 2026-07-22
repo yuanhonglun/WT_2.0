@@ -46,6 +46,10 @@ _TRANSLATIONS = {
     "Run": {"zh": "运行"},
     "Stop": {"zh": "停止"},
     "Re-annotate": {"zh": "重新定性"},
+    "Confirm Re-annotation": {"zh": "确认重新定性"},
+    "Re-annotation overwrites the current annotation results, and the old "
+    "results cannot be recovered even if you cancel midway.\n\nContinue?": {
+        "zh": "重新定性会覆盖当前定性结果；即使中途取消，旧结果也无法恢复。\n\n是否继续？"},
     "Save Project": {"zh": "保存项目"},
     "Open Project": {"zh": "打开项目"},
     "Export": {"zh": "导出"},

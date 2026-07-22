@@ -2,7 +2,7 @@
 
 PR-D makes isotope / adduct copies each count as an independent feature
 (MS-DIAL convention). Stage 5 already *marks-and-keeps* the non-representative
-adduct copy (``status="adduct_removed"``, ``is_duplicate=True``, shared
+adduct copy (``status="adduct_excluded"``, ``is_duplicate=True``, shared
 ``adduct_group_id``) instead of deleting it, and Stage 7 iterates **all**
 per-replicate features (no status filter), so each adduct copy already becomes
 its own counted ``Feature``. Task D3 plumbs ``adduct_group_id`` onto ``Feature``
@@ -129,7 +129,7 @@ def test_adduct_copies_counted_end_to_end(tmp_path):
     assert f_na.is_duplicate is True
 
     # Stage 7: every per-replicate feature becomes its own Feature (no filter).
-    feats = run_stage7({"1": [f_h, f_na]}, {"1": []}, cfg)
+    feats = run_stage7({"1": [f_h, f_na]}, cfg)
     assert len(feats) == 2
 
     # Stage 8: export to CSV and read back (skip the leading ``#`` header lines).

@@ -9,6 +9,7 @@ import numpy as np
 from asfam.config import ProcessingConfig
 from asfam.models import CandidateFeature
 from asfam.core.similarity import composite_similarity
+from metabo_core.annotation import load_library_lean
 
 logger = logging.getLogger(__name__)
 
@@ -106,44 +107,30 @@ def run_stage2b(
 # ---------------------------------------------------------------------------
 
 def _load_library(library_path: str) -> Optional[list[dict]]:
-    """Load spectral library from MSP or MGF into the *lean* representation.
+    """Load the spectral library as a flat list of lean spectra.
 
-    Keeps only the metadata fields the matchers read
-    (``ANNOTATION_METADATA_FIELDS``) and stores peaks as float64 numpy
-    arrays. For the production LC-MS library (``lib/lcms/pos.msp`` ~6.7GB,
-    ~6.4M spectra) the full representation — every metadata field
-    (inchi / smiles / comment / ...) plus Python-list peaks — is ~3x larger
-    and exhausts RAM on re-annotation / inference-on runs. Both consumers of
-    this list read only the kept fields: stage 2.5 inference
-    (:func:`_library_match`) and stage 6.5 annotation
-    (``build_index_from_list`` / ``match_feature_topn``). float64 preserves
-    the exact peak values, so matching is byte-identical to the full load.
+    Thin wrapper over ``metabo_core.annotation.load_library_lean``: it adds
+    only the ``_mz_int`` cache that :func:`_library_match` uses to skip
+    candidates outside the feature's nominal MS1 channel.
+
+    Returns the *flat list*, not an index — stage 2.5 walks it directly,
+    while stage 6.5 builds an index from the same list via
+    ``build_index_from_list``. Sharing one load between the two stages is
+    what makes the preload in the orchestrator worthwhile.
+
+    The orchestrator owns the release: this list must be dropped right
+    after stage 6.5 (see the library-lifetime invariant in CLAUDE.md).
     """
-    try:
-        from asfam.io.spectral_library import read_mgf, read_msp
-        from metabo_core.annotation.library import ANNOTATION_METADATA_FIELDS
-
-        keep = set(ANNOTATION_METADATA_FIELDS)
-        if library_path.lower().endswith(".mgf"):
-            spectra = read_mgf(library_path, keep_metadata=keep, as_arrays=True)
-        elif library_path.lower().endswith(".msp"):
-            spectra = read_msp(library_path, keep_metadata=keep, as_arrays=True)
-        else:
-            logger.warning("Unsupported library format: %s", library_path)
-            return None
-
-        for spec in spectra:
-            pmz = spec.get("metadata", {}).get("precursor_mz")
-            if pmz is not None:
-                spec["_mz_int"] = int(round(float(pmz)))
-            else:
-                spec["_mz_int"] = None
-
-        logger.info("Loaded %d spectra from library %s", len(spectra), library_path)
-        return spectra
-    except Exception as e:
-        logger.warning("Failed to load library %s: %s", library_path, e)
+    spectra = load_library_lean(library_path)
+    if spectra is None:
         return None
+
+    for spec in spectra:
+        pmz = spec.get("metadata", {}).get("precursor_mz")
+        spec["_mz_int"] = int(round(float(pmz))) if pmz is not None else None
+
+    logger.info("Loaded %d spectra from library %s", len(spectra), library_path)
+    return spectra
 
 
 # ---------------------------------------------------------------------------

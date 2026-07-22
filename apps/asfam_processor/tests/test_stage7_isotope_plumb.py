@@ -49,7 +49,7 @@ def test_stage7_plumbs_isotope_index_and_group_single_replicate():
     cf = _make_feature("rep1_00000", mz=286.0533, rt_apex=4.0, height=1100.0,
                        isotope_index=2, isotope_group_id=7)
 
-    out = run_stage7({"1": [cf]}, {"1": []}, ProcessingConfig())
+    out = run_stage7({"1": [cf]}, ProcessingConfig())
 
     assert len(out) == 1
     assert out[0].isotope_index == 2

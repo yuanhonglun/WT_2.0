@@ -161,17 +161,20 @@ def test_slow_drift_stays_one_roi():
 # ---------------------------------------------------------------------------
 
 
+# Local-data smoke test: point ``METRA_TEST_MZML`` at an mzML file to enable it.
+# Skipped by default, since no raw data ships with this repository.
+_REAL_MZML_ENV = os.environ.get("METRA_TEST_MZML", "")
+_REAL_MZML = Path(_REAL_MZML_ENV) if _REAL_MZML_ENV else None
+
+
 @pytest.mark.skipif(
-    not Path("D:/HNU/课题/Project/metabo-platform/test_data/dda/MIX_P_255-284_1ST_DDA_1.mzML").exists(),
-    reason="real DDA mzML not present in environment",
+    _REAL_MZML is None or not _REAL_MZML.exists(),
+    reason="real mzML not present (set METRA_TEST_MZML to enable)",
 )
 def test_real_dda_mzml_smoke():
-    """用 DDA mzML 检验性能 + 输出量级。"""
-    # 注意: 这里通过 apps.dda 的 reader 来读 mzML, 但只在测试里用,
-    # 不违反 metabo_core 不依赖 app 的边界 (测试在 packages/metabo_core/tests
-    # 下, 但通过 conftest 设置的 pythonpath 也能访问 apps)。
-    # 如果 app 不可导入, 改用 pymzml 直接读。
-    file_path = Path("D:/HNU/课题/Project/metabo-platform/test_data/dda/MIX_P_255-284_1ST_DDA_1.mzML")
+    """用真实 mzML 检验性能 + 输出量级。"""
+    # 注意: 这里只在测试里读 mzML, 不违反 metabo_core 不依赖 app 的边界。
+    file_path = _REAL_MZML
 
     ms1_scans = _read_ms1_scans_minimal(file_path)
     assert len(ms1_scans) > 0, "no MS1 scans read from mzML"

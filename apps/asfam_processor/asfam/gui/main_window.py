@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtWidgets import (
@@ -19,6 +20,7 @@ from metabo_gui.resources import app_icon_path
 from metabo_gui.theme import STYLESHEET
 
 from asfam.config import ProcessingConfig
+from asfam.io.eic_store import SpotMap, load_spot_map, open_store
 from asfam.models import Feature
 from asfam import __version__
 
@@ -71,9 +73,16 @@ class MainWindow(QMainWindow):
 
         self.config = ProcessingConfig()
         self.features: list[Feature] = []
-        self.raw_data: Optional[dict] = None
         self.worker: Optional[PipelineWorker] = None
+        # Per-sample candidates live in <output>/_work, not in memory. A project
+        # file saved before v1.0.260709.5 still embeds them; ``_candidates_by_rep``
+        # holds those so old projects keep working.
         self._candidates_by_rep: Optional[dict] = None
+        self._work_dir: Optional[str] = None
+        # Candidate id -> aligned spot id, loaded beside alignment.eic. Empty
+        # until a run or a project load fills it in.
+        self._spotmap = SpotMap()
+        self._sample_files: dict[str, list[str]] = {}
         self._stage_stats: dict = {}
         self._mzml_paths: list[str] = []
         self._library_path: Optional[str] = None
@@ -131,6 +140,14 @@ class MainWindow(QMainWindow):
         self.act_open_project = QAction("Open Project", self)
         self.act_open_project.triggered.connect(self._on_open_project)
         toolbar.addAction(self.act_open_project)
+
+        # Intermediate results are kept on purpose (they let a crashed or
+        # re-parameterized export skip stages 0-6.5), so the only way to delete
+        # them is this explicit action.
+        self.act_clear_work = QAction("Clear Intermediates", self)
+        self.act_clear_work.setEnabled(False)
+        self.act_clear_work.triggered.connect(self._on_clear_work_dir)
+        toolbar.addAction(self.act_clear_work)
 
         toolbar.addSeparator()
 
@@ -249,6 +266,11 @@ class MainWindow(QMainWindow):
             return
 
         self.setup_panel.apply_to_config()
+
+        reuse = self._ask_reuse_checkpoints(output_dir)
+        if reuse is None:
+            return  # user cancelled
+
         self.progress_panel.reset()
         self.act_run.setEnabled(False)
         self.act_stop.setEnabled(True)
@@ -258,6 +280,7 @@ class MainWindow(QMainWindow):
             self.config, mzml_paths, output_dir,
             self.setup_panel.get_library_path(),
             self.setup_panel.get_sample_groups(),
+            reuse_checkpoints=reuse,
         )
         self.worker.progress_update.connect(self.progress_panel.update_progress)
         self.worker.pipeline_completed.connect(self._on_pipeline_done)
@@ -265,24 +288,80 @@ class MainWindow(QMainWindow):
         self.worker.start()
         self.progress_panel.log(f"Pipeline started with {len(mzml_paths)} files...")
 
+    def _ask_reuse_checkpoints(self, output_dir: str) -> Optional[bool]:
+        """Offer to skip samples already spilled under ``<output_dir>/_work``.
+
+        Returns True/False, or None if the user cancelled the run. Answering
+        "yes" still lets the orchestrator recompute a sample whose config
+        fingerprint changed — the prompt only asks about intent.
+        """
+        from asfam.io import spill
+        from asfam.pipeline.orchestrator import WORK_DIRNAME
+
+        work_dir = os.path.join(output_dir, WORK_DIRNAME)
+        found = spill.scan_checkpoints(work_dir)
+        if not found:
+            return True
+
+        newest = max((created for _, created in found if created), default="?")
+        answer = QMessageBox.question(
+            self, "Intermediate Results Found",
+            f"Found intermediate results for {len(found)} sample(s) "
+            f"(latest: {newest}).\n\n"
+            "Reuse them and skip stages 0-6.5 for those samples?\n"
+            "Choosing No recomputes every sample from the raw files.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Cancel:
+            return None
+        return answer == QMessageBox.Yes
+
+    def _on_clear_work_dir(self):
+        """Delete the spilled intermediate results (never done automatically)."""
+        if not self._work_dir:
+            return
+        from asfam.io import spill
+
+        answer = QMessageBox.question(
+            self, "Clear Intermediates",
+            f"Delete the intermediate results in\n{self._work_dir}?\n\n"
+            "A later re-run will have to redo stages 0-6.5 for every sample.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        n = spill.clear_work_dir(self._work_dir)
+        self.progress_panel.log(f"Removed {n} intermediate file(s).")
+        self.act_clear_work.setEnabled(False)
+        self.act_reannotate.setEnabled(False)
+
     def _on_stop(self):
         if self.worker:
             self.worker.cancel()
             self.progress_panel.log("Cancellation requested...")
 
-    def _on_pipeline_done(self, features, raw_data):
+    def _on_pipeline_done(self, features):
         self.features = features
-        self.raw_data = raw_data
 
         if self.worker and self.worker.orchestrator:
-            self._candidates_by_rep = self.worker.orchestrator.candidates_by_rep
-            self._stage_stats = self.worker.orchestrator.stage_stats
+            orch = self.worker.orchestrator
+            self._stage_stats = orch.stage_stats
+            # ReAnnotateWorker's orchestrator never grouped the inputs, so keep
+            # whatever the full run (or the project load) already established.
+            if orch.work_dir:
+                self._work_dir = str(orch.work_dir)
+                # Candidates now live in _work/, not memory. Only drop the
+                # inline copy a legacy project may have loaded once a run has
+                # actually spilled a replacement.
+                self._candidates_by_rep = None
+            if orch.sample_files:
+                self._sample_files = dict(orch.sample_files)
             if hasattr(self.worker, 'mzml_paths'):
                 self._mzml_paths = self.worker.mzml_paths
             if hasattr(self.worker, 'library_path'):
                 self._library_path = self.worker.library_path
         else:
-            self._candidates_by_rep = None
             self._stage_stats = {}
 
         # Setup view mode combo with sample names
@@ -290,19 +369,11 @@ class MainWindow(QMainWindow):
         self.view_combo.clear()
         self.view_combo.addItem("Aligned (all samples)")
         self._rep_id_map = {}  # combo index -> rep_id
-        if self._candidates_by_rep:
-            for idx, rep_id in enumerate(sorted(self._candidates_by_rep.keys())):
-                # Use first file name as sample label
-                sample_name = f"Sample {rep_id}"
-                if raw_data and rep_id in raw_data:
-                    segs = raw_data[rep_id]
-                    if segs:
-                        from pathlib import Path
-                        fname = Path(segs[0].file_path).stem
-                        # Remove segment part to get sample name
-                        sample_name = fname
-                self.view_combo.addItem(sample_name)
-                self._rep_id_map[idx + 1] = rep_id
+        for idx, rep_id in enumerate(sorted(self._sample_files)):
+            paths = self._sample_files[rep_id]
+            sample_name = Path(paths[0]).stem if paths else f"Sample {rep_id}"
+            self.view_combo.addItem(sample_name)
+            self._rep_id_map[idx + 1] = rep_id
         self.view_combo.setEnabled(True)
         self.view_combo.setCurrentIndex(0)
         self.view_combo.blockSignals(False)
@@ -321,14 +392,15 @@ class MainWindow(QMainWindow):
         self.feature_table.proxy.set_annotated_min_matched(mm)
         self.scatter_plot.set_features(features)
         self.feature_table.set_features(features)
-        self.eic_plot.set_raw_data(raw_data)
+        self._load_eic_store()
 
         self.progress_panel.set_complete(len(features))
         self.act_run.setEnabled(True)
         self.act_stop.setEnabled(False)
         self.act_export.setEnabled(True)
         self.act_save_project.setEnabled(True)
-        self.act_reannotate.setEnabled(True)
+        self.act_reannotate.setEnabled(bool(self._work_dir))
+        self.act_clear_work.setEnabled(bool(self._work_dir))
 
         self.statusBar().showMessage(f"Done: {len(features)} features")
         self.progress_panel.log(f"Pipeline complete: {len(features)} features")
@@ -357,6 +429,7 @@ class MainWindow(QMainWindow):
                 library_path=self._library_path,
                 stage_stats=self._stage_stats,
                 candidates_by_rep=self._candidates_by_rep,
+                work_dir=self._work_dir,
             )
             self.progress_panel.log(f"Project auto-saved: {proj_path.name}")
             self._saving_project = False
@@ -392,15 +465,14 @@ class MainWindow(QMainWindow):
             if rep_id is None:
                 return
             self._view_mode = rep_id
-            if self._candidates_by_rep and rep_id in self._candidates_by_rep:
-                cands = self._candidates_by_rep[rep_id]
+            cands = self._candidates_for(rep_id)
+            if cands:
                 # Convert CandidateFeature to Feature-like for display
                 from asfam.models import Feature
-                import numpy as np
                 rep_features = []
                 for c in cands:
-                    if c.status != "active":
-                        continue
+                    # No status filter: a dedup stage moving a feature out of
+                    # its own candidate set ("*_excluded") never removed it.
                     f = Feature(
                         feature_id=c.feature_id,
                         precursor_mz=c.precursor_mz,
@@ -436,6 +508,58 @@ class MainWindow(QMainWindow):
         self.eic_plot.clear()
         self.ms2_plot.clear()
 
+    def _candidates_for(self, rep_id: str) -> list:
+        """One sample's CandidateFeatures, read from ``_work/`` on demand.
+
+        Projects saved before the spill existed still carry their candidates
+        inline; prefer those when present.
+        """
+        if self._candidates_by_rep and rep_id in self._candidates_by_rep:
+            return self._candidates_by_rep[rep_id]
+        if not self._work_dir:
+            return []
+        from asfam.io import spill
+        try:
+            return spill.read_sample_features(Path(self._work_dir) / rep_id,
+                                              load_ms2=True)
+        except (OSError, spill.SpillFormatError) as e:
+            self.progress_panel.log(f"Could not read sample {rep_id}: {e}")
+            return []
+
+    def _load_eic_store(self) -> None:
+        """Point the EIC viewer at ``alignment.eic`` and its key map, both of
+        which sit beside ``_work/``.
+
+        Absent when gap fill was disabled or could not find the raw data; the
+        viewer says so rather than reaching for an mzML.
+        """
+        output_dir = Path(self._work_dir).parent if self._work_dir else None
+        store = open_store(output_dir) if output_dir else None
+        self.eic_plot.set_eic_store(store)
+        self._spotmap = load_spot_map(output_dir) if output_dir else SpotMap()
+        if store is None:
+            self.progress_panel.log(
+                "No alignment.eic found — EIC panel unavailable")
+        else:
+            self.progress_panel.log(
+                f"Chromatogram store: {len(store)} features")
+
+    def _store_key_for(self, feat: Feature) -> Optional[str]:
+        """Where ``feat``'s chromatograms live in ``alignment.eic``.
+
+        The store is keyed by aligned spot id. The aligned view's features carry
+        exactly that; the single-sample view's are candidates read back from
+        ``_work/``, whose ids belong to a namespace the store has never seen — so
+        they go through the spot map. ``None`` means no spot claimed this peak.
+
+        A project written before ``spotmap.json`` existed has no map to go
+        through: fall back to the raw id, which misses and leaves the viewer's
+        generic message in place, rather than crashing or plotting a stranger.
+        """
+        if self._view_mode == "aligned" or not self._spotmap.spot_of:
+            return feat.feature_id
+        return self._spotmap.spot_of.get(feat.feature_id)
+
     # ------------------------------------------------------------------
     # Feature selection
     # ------------------------------------------------------------------
@@ -445,9 +569,17 @@ class MainWindow(QMainWindow):
         if feat is None:
             return
 
-        # EIC: show only current replicate in single mode, all in aligned mode
+        # EIC: show only current replicate in single mode, all in aligned mode.
+        # The key is translated here and passed in — the viewer must not derive
+        # one from feature_id, which in single-sample mode names a candidate the
+        # store knows nothing about.
+        key = self._store_key_for(feat)
         self.eic_plot.set_view_mode(self._view_mode)
-        self.eic_plot.show_feature(feat)
+        self.eic_plot.show_feature(
+            feat, store_key=key,
+            fragment_source=(self._spotmap.representative_of.get(key)
+                             if key else None),
+        )
 
         # MS2: show with annotation candidates (combo box populated internally)
         self.ms2_plot.show_feature(feat)
@@ -588,14 +720,30 @@ class MainWindow(QMainWindow):
 
     def _on_reannotate(self):
         """Re-run annotation only (stages 6.5 -> 7 -> 8)."""
-        if not self._candidates_by_rep:
+        from asfam.io import spill
+        if not self._work_dir or not spill.scan_checkpoints(self._work_dir):
             QMessageBox.warning(self, "No Data",
-                "No candidate features available. Run the full pipeline first "
-                "or open a project file.")
+                "No intermediate results available. Run the full pipeline first "
+                "or open a project whose _work directory still exists.")
             return
         output_dir = self.setup_panel.get_output_dir()
         if not output_dir:
             QMessageBox.warning(self, "No Output", "Please select an output directory.")
+            return
+
+        # run_reannotate rewrites each sample's spill in place, clearing the old
+        # annotations before it starts.
+        from asfam.gui.i18n import tr
+        confirm = QMessageBox.question(
+            self,
+            tr("Confirm Re-annotation"),
+            tr("Re-annotation overwrites the current annotation results, and the "
+               "old results cannot be recovered even if you cancel midway.\n\n"
+               "Continue?"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
             return
 
         self.setup_panel.apply_to_config()
@@ -607,10 +755,10 @@ class MainWindow(QMainWindow):
         from asfam.gui.worker import ReAnnotateWorker
         self.worker = ReAnnotateWorker(
             self.config,
-            self._candidates_by_rep,
-            self.raw_data,
             output_dir,
             self.setup_panel.get_library_path(),
+            work_dir=self._work_dir,
+            sample_files=self._sample_files,
         )
         self.worker.progress_update.connect(self.progress_panel.update_progress)
         self.worker.pipeline_completed.connect(self._on_pipeline_done)
@@ -634,6 +782,7 @@ class MainWindow(QMainWindow):
             library_path=self._library_path,
             stage_stats=self._stage_stats,
             candidates_by_rep=self._candidates_by_rep,
+            work_dir=self._work_dir,
         )
         self.progress_panel.log(f"Project saved to {path}")
         QMessageBox.information(self, "Saved", f"Project saved to {path}")
@@ -663,17 +812,26 @@ class MainWindow(QMainWindow):
         self._mzml_paths = proj.get("mzml_paths", [])
         self._library_path = proj.get("library_path")
         self._stage_stats = proj.get("stage_stats", {})
-        self._candidates_by_rep = proj.get("candidates_by_rep")
+        self._candidates_by_rep = proj.get("candidates_by_rep")  # pre-spill projects
+        self._work_dir = proj.get("work_dir")
+        if self._work_dir and not os.path.isdir(self._work_dir):
+            self.progress_panel.log(
+                f"Intermediate results directory is gone: {self._work_dir}")
+            self._work_dir = None
+
+        from asfam.io import spill
+        rep_ids = sorted(self._candidates_by_rep or {})
+        if not rep_ids and self._work_dir:
+            rep_ids = sorted(sid for sid, _ in spill.scan_checkpoints(self._work_dir))
 
         # Setup view combo
         self.view_combo.blockSignals(True)
         self.view_combo.clear()
         self.view_combo.addItem("Aligned (all replicates)")
         self._rep_id_map = {}
-        if self._candidates_by_rep:
-            for idx, rep_id in enumerate(sorted(self._candidates_by_rep.keys())):
-                self.view_combo.addItem(f"Replicate {rep_id}")
-                self._rep_id_map[idx + 1] = rep_id
+        for idx, rep_id in enumerate(rep_ids):
+            self.view_combo.addItem(f"Replicate {rep_id}")
+            self._rep_id_map[idx + 1] = rep_id
         self.view_combo.setEnabled(True)
         self.view_combo.setCurrentIndex(0)
         self.view_combo.blockSignals(False)
@@ -690,13 +848,13 @@ class MainWindow(QMainWindow):
         self.feature_table.set_features(self.features)
         self.act_export.setEnabled(True)
         self.act_save_project.setEnabled(True)
-        self.act_reannotate.setEnabled(bool(self._candidates_by_rep))
+        self.act_reannotate.setEnabled(bool(self._work_dir))
+        self.act_clear_work.setEnabled(bool(self._work_dir))
 
-        # Auto-load raw data for EIC viewing
-        self.raw_data = None
+        # Resolve the mzML paths. The EIC viewer no longer needs them — it reads
+        # alignment.eic — but re-annotation re-runs gap fill, which does.
+        self._sample_files = {}
         if self._mzml_paths:
-            import os
-            # Resolve paths relative to project file location
             proj_dir = os.path.dirname(path)
             resolved = []
             for mp in self._mzml_paths:
@@ -708,24 +866,19 @@ class MainWindow(QMainWindow):
                     if os.path.exists(alt):
                         resolved.append(alt)
             if resolved:
-                self.progress_panel.log(f"Loading raw data from {len(resolved)} mzML files...")
+                from asfam.pipeline.stage0_load import group_files_by_sample
                 try:
-                    from asfam.pipeline.stage0_load import run_stage0
-                    sample_groups = None
-                    if self._candidates_by_rep:
-                        sample_groups = self.setup_panel.get_sample_groups()
-                    raw_data = run_stage0(resolved, self.config, None, sample_groups)
-                    self.raw_data = raw_data
-                    self.eic_plot.set_raw_data(raw_data)
-                    self.progress_panel.log(f"Raw data loaded: {len(raw_data)} replicates")
+                    self._sample_files = group_files_by_sample(
+                        resolved, self.setup_panel.get_sample_groups(),
+                    )
+                    self.progress_panel.log(
+                        f"Raw data registered: {len(self._sample_files)} replicates")
                 except Exception as e:
-                    self.progress_panel.log(f"Warning: failed to load raw data: {e}")
-                    QMessageBox.warning(self, "Raw Data",
-                                        f"Could not load mzML files for EIC viewing:\n{e}\n\n"
-                                        f"Paths: {resolved}")
+                    self.progress_panel.log(f"Warning: could not group mzML files: {e}")
             else:
                 missing = [os.path.basename(p) for p in self._mzml_paths]
                 self.progress_panel.log(f"Warning: mzML files not found: {', '.join(missing)}")
+        self._load_eic_store()
 
         self.statusBar().showMessage(f"Loaded: {len(self.features)} features from {path}")
         self.progress_panel.log(f"Project loaded: {len(self.features)} features")

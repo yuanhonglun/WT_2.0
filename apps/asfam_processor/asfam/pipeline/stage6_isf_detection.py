@@ -115,7 +115,7 @@ def run_stage6(
                 )
 
                 if r >= config.isf_eic_pearson_threshold and n_pts >= needed_n:
-                    child.status = "isf_removed"
+                    child.status = "isf_excluded"
                     child.is_duplicate = True
                     child.duplicate_type = "isf"
                     child.isf_parent_id = parent.feature_id
