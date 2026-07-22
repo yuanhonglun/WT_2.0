@@ -6,7 +6,7 @@ import os
 import time
 from pathlib import Path
 
-from metabo_gui.logging_setup import setup_app_logging
+from metabo_gui.logging_setup import NOISY_LIBRARY_LOGGERS, setup_app_logging
 
 
 def _detach_handlers():
@@ -18,6 +18,17 @@ def _detach_handlers():
         except Exception:
             pass
         root.removeHandler(h)
+    root.setLevel(logging.WARNING)
+    for name in NOISY_LIBRARY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+
+
+def _read_log(tmp_path: Path) -> str:
+    for h in logging.getLogger().handlers:
+        h.flush()
+    logs = list(tmp_path.glob("crash_*.log"))
+    assert logs, "no log file produced"
+    return logs[-1].read_text(encoding="utf-8")
 
 
 def test_rotation_keeps_newest_n(tmp_path: Path):
@@ -55,12 +66,33 @@ def test_filehandler_attached_to_root(tmp_path: Path):
     try:
         setup_app_logging("testapp", log_dir=tmp_path)
         logging.info("hello from test")
-        # Force flush via handler shutdown
-        for h in logging.getLogger().handlers:
-            h.flush()
-        logs = list(tmp_path.glob("crash_*.log"))
-        assert logs, "no log file produced"
-        text = logs[-1].read_text(encoding="utf-8")
-        assert "hello from test" in text
+        assert "hello from test" in _read_log(tmp_path)
+    finally:
+        _detach_handlers()
+
+
+def test_noisy_library_debug_is_suppressed(tmp_path: Path):
+    """matplotlib DEBUG must not reach the crash log, but our own DEBUG must."""
+    try:
+        setup_app_logging("testapp", log_dir=tmp_path)
+        logging.getLogger("matplotlib.font_manager").debug("findfont: score(...)")
+        logging.getLogger("PIL.PngImagePlugin").debug("STREAM b'IHDR'")
+        logging.getLogger("matplotlib").warning("a real matplotlib warning")
+        logging.getLogger("asfam.pipeline.stage1").debug("pipeline detail")
+
+        text = _read_log(tmp_path)
+        assert "findfont" not in text
+        assert "IHDR" not in text
+        assert "a real matplotlib warning" in text
+        assert "pipeline detail" in text
+    finally:
+        _detach_handlers()
+
+
+def test_quiet_libraries_override_keeps_third_party_debug(tmp_path: Path):
+    try:
+        setup_app_logging("testapp", log_dir=tmp_path, quiet_libraries=())
+        logging.getLogger("matplotlib.font_manager").debug("findfont: score(...)")
+        assert "findfont" in _read_log(tmp_path)
     finally:
         _detach_handlers()

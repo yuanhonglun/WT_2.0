@@ -439,8 +439,8 @@ def simple_dot_product(
 
 
 def composite_similarity_breakdown(
-    peaks_query: list[tuple[float, float]],
-    peaks_ref: list[tuple[float, float]],
+    peaks_query: Optional[list[tuple[float, float]]],
+    peaks_ref: Optional[list[tuple[float, float]]],
     mz_tolerance: float = 0.02,
     precursor_query: float = 0.0,
     precursor_ref: float = 0.0,
@@ -478,18 +478,25 @@ def composite_similarity_breakdown(
 
     RT 项的 ``rt_tolerance / 60.0`` 分钟-秒换算保留：RT 数据通常以
     分钟存储而容差以秒输入，统一在此处转换以避免每个调用点重复。
+
+    ``q_arrays`` / ``r_arrays``（可选）是预先构造好的 float64 ``(mz,
+    intensity)`` 数组。**两者都给出时，本函数完全不读 ``peaks_query`` /
+    ``peaks_ref``**，调用方可以传 ``None``——库匹配热循环靠这一点省掉每个
+    (feature, candidate) 的 ``list(zip(...))`` 构造。数组路径与 tuple 路径
+    的算术顺序逐条对应，返回的 ``CompositeSimilarityResult`` 逐位相同
+    （见 ``tests/test_composite_similarity_arrays.py`` 的随机对拍）。
     """
-    if not peaks_query or not peaks_ref:
+    use_arrays = q_arrays is not None and r_arrays is not None
+    if use_arrays:
+        mz_q_a, int_q_a = q_arrays
+        mz_r_a, int_r_a = r_arrays
+        if mz_q_a.size == 0 or mz_r_a.size == 0:
+            return CompositeSimilarityResult(0.0, 0, 0.0, 0.0, 0.0)
+    elif not peaks_query or not peaks_ref:
         return CompositeSimilarityResult(0.0, 0, 0.0, 0.0, 0.0)
 
     # 优先 product-ion 匹配；如果中性损失方向能匹到更多峰，则改用 NL 路径。
-    # ``q_arrays`` / ``r_arrays``（可选）是预先构造好的 float64 (mz, intensity)
-    # 数组；库匹配热循环传入它们，使 direct 与 NL 两个方向共用同一对数组，
-    # 省掉每个 (feature, candidate) 调用里 ``np.fromiter`` 的重复构造。匹配对
-    # 取值与 tuple 路径逐位一致，故三套点积/Matched% 完全不变。
-    if q_arrays is not None and r_arrays is not None:
-        mz_q_a, int_q_a = q_arrays
-        mz_r_a, int_r_a = r_arrays
+    if use_arrays:
         matched = _greedy_match_arrays(
             mz_q_a, int_q_a, mz_r_a, int_r_a, mz_tolerance, 0.0)
         if precursor_query > 0 and precursor_ref > 0:
@@ -509,21 +516,32 @@ def composite_similarity_breakdown(
     n_matched = len(matched)
 
     # 一次性算好归一化基准
-    max_q = max(i for _, i in peaks_query)
-    max_r = max(i for _, i in peaks_ref)
+    if use_arrays:
+        max_q = float(int_q_a.max())
+        max_r = float(int_r_a.max())
+    else:
+        max_q = max(i for _, i in peaks_query)
+        max_r = max(i for _, i in peaks_ref)
     if max_q < 1e-12 or max_r < 1e-12:
         return CompositeSimilarityResult(0.0, 0, 0.0, 0.0, 0.0)
 
     # 共用同一组匹配对，一次性算出三套点积
-    wdp, sdp, rdp = _compute_three_scores(
-        matched, peaks_query, peaks_ref, max_q, max_r)
+    if use_arrays:
+        wdp, sdp, rdp = _compute_three_scores_arrays(
+            matched, mz_q_a, int_q_a, mz_r_a, int_r_a, max_q, max_r)
+    else:
+        wdp, sdp, rdp = _compute_three_scores(
+            matched, peaks_query, peaks_ref, max_q, max_r)
 
     # Matched%（MS-DIAL counter/libCounter）：分母 = 强度 ≥ 参考基峰 1% 的显著参考峰数
     # （局部 n_sig_ref，floor 1）；分子 = 这些显著参考峰中有 query 匹配者。
     # 限定分子到显著参考峰，使 matched_pct 落在 [0,1]，与 MS-DIAL counter 一致——
     # 否则匹配到 <1% 基峰的噪声参考峰会让占比 >1。
     thresh = max_r * 0.01
-    n_sig_ref = max(sum(1 for _, i in peaks_ref if i >= thresh), 1)
+    if use_arrays:
+        n_sig_ref = max(int(np.count_nonzero(int_r_a >= thresh)), 1)
+    else:
+        n_sig_ref = max(sum(1 for _, i in peaks_ref if i >= thresh), 1)
     n_matched_sig = sum(1 for (_q, (_mz_r, int_r)) in matched if int_r >= thresh)
     matched_pct = n_matched_sig / n_sig_ref
 
@@ -588,7 +606,62 @@ def _compute_three_scores(
     max_r: float,
 ) -> tuple[float, float, float]:
     """Compute WDP, SDP, RDP from pre-matched pairs in a single pass."""
-    n_ref = len(peaks_ref)
+    return _three_scores_core(
+        matched, peaks_query, peaks_ref, len(peaks_ref), max_q, max_r)
+
+
+def _compute_three_scores_arrays(
+    matched: list,
+    mz_q: np.ndarray,
+    int_q: np.ndarray,
+    mz_r: np.ndarray,
+    int_r: np.ndarray,
+    max_q: float,
+    max_r: float,
+) -> tuple[float, float, float]:
+    """Array-input twin of :func:`_compute_three_scores`.
+
+    Feeds the same core the same ``(mz, intensity)`` pairs in the same order,
+    so every accumulator sees an identical sequence of float64 additions and
+    the returned WDP/SDP/RDP are bit-identical to the tuple path. ``tolist()``
+    yields plain Python floats holding the exact float64 values, which is what
+    the tuple path already carried.
+    """
+    return _three_scores_core(
+        matched,
+        zip(mz_q.tolist(), int_q.tolist()),
+        zip(mz_r.tolist(), int_r.tolist()),
+        mz_r.shape[0],
+        max_q,
+        max_r,
+    )
+
+
+def _three_scores_core(
+    matched: list,
+    query_pairs,
+    ref_pairs,
+    n_ref: int,
+    max_q: float,
+    max_r: float,
+) -> tuple[float, float, float]:
+    """Single implementation behind both the tuple and the array entry points.
+
+    ``query_pairs`` / ``ref_pairs`` are iterated exactly once, in peak order.
+    Keeping one body (rather than a hand-mirrored numpy version) is what makes
+    the two paths provably bit-identical: the summation order, and therefore
+    the float64 rounding, cannot drift apart.
+
+    Peaks are identified by ``round(mz, 4)``, which makes both ``pairs``
+    iterables sensitive to their element *type*: ``round`` on a ``np.float64``
+    scales-and-rints, while ``round`` on a Python ``float`` rounds the decimal
+    correctly, and the two disagree on exact 5-decimal half-way ties. Feed this
+    function Python floats only — ``matched`` always carries them, so a numpy
+    scalar on the ``ref_pairs`` side makes a *matched* peak look unmatched and
+    silently inflates WDP's and RDP's denominator. That was a real bug against
+    ``lib/lcms/pos.msp`` (5-decimal m/z); see
+    ``docs/superpowers/plans/.baselines-260708.md`` §1.2.
+    """
     penalty = _peak_count_penalty(n_ref)
 
     # Build matched sets for identifying unmatched peaks
@@ -627,13 +700,13 @@ def _compute_three_scores(
     sq_s = 0.0  # SDP uses all query peaks
     sr_s = 0.0  # SDP uses all ref peaks
 
-    for mz, i in peaks_query:
+    for mz, i in query_pairs:
         ni = i / max_q
         sq_s += ni
         if round(mz, 4) not in matched_q_idx:
             sq_w_unmatched += ni * mz
 
-    for mz, i in peaks_ref:
+    for mz, i in ref_pairs:
         ni = i / max_r
         sr_s += ni
         if round(mz, 4) not in matched_r_idx:

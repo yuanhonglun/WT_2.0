@@ -4,6 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
+# Pin pytest-qt to PyQt5 (the binding every app/package declares and imports).
+# A stray PySide6 in the env otherwise makes pytest-qt — and, via it,
+# matplotlib's Qt backend — load PySide6, which clashes with the app's PyQt5
+# widgets and crashes every test that builds a matplotlib canvas/toolbar.
+qt_api = "pyqt5"
 testpaths = [
     "packages/metabo_core/tests",
     "packages/metabo_gui/tests",

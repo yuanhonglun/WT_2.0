@@ -3,13 +3,30 @@
 Mouse interactions are provided by the shared ``metabo_gui.canvas.PanZoomMixin``
 (scroll zoom, direction-locked left-drag pan, right-drag rubber-band zoom,
 double-click reset, axis-area single-axis zoom).
+
+Every chromatogram comes out of ``alignment.eic``, which gap filling wrote while
+it had the raw data open. This widget therefore touches no mzML at all: it reads
+one spot's traces (a few KiB) instead of re-parsing a 157 MiB segment per
+replicate.
+
+The store is keyed by *aligned spot* id, and the single-sample view's features
+carry *candidate* ids — a disjoint namespace. So the caller passes the key in;
+this widget never derives one from ``feature.feature_id``. Deriving it is what
+made the single-sample panel report "no chromatogram" for every feature it was
+ever shown.
+
+The top panel shows the trace each replicate's height and area were actually
+measured on — the quantitation ion — so what the user reads off the plot is what
+the export reports. Gap-filled replicates are dashed.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+)
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -18,11 +35,14 @@ from metabo_gui.canvas import PanZoomMixin
 from metabo_gui.plot_toolbar import make_plot_toolbar
 from metabo_gui.theme import THEME_BLUE
 
-from asfam.models import Feature, RawSegmentData
-from asfam.core.eic import extract_ms1_eic
+from asfam.models import Feature
 from asfam.core.smoothing import smooth_eic
+from asfam.io.eic_store import EicStore
 
 COLORS = ["#2D6A9F", "#21A67A", "#8B5CF6", "#E05050", "#F59E0B"]
+ION_COLORS = ["#2D6A9F", "#E05050", "#21A67A", "#F59E0B",
+              "#8B5CF6", "#FF6B6B", "#4ECDC4", "#95A5A6"]
+MAX_IONS = 8
 
 
 def _autoscale_y_to_window(ax, x_lo: float, x_hi: float) -> None:
@@ -85,10 +105,12 @@ class EICPlotWidget(QWidget, PanZoomMixin):
         layout.addLayout(toolbar_row)
         layout.addWidget(self.canvas)
 
-        self._raw_data: Optional[dict] = None
+        self._store: Optional[EicStore] = None
         self._view_mode: str = "aligned"
         self._show_smooth: bool = True
         self._current_feature: Optional[Feature] = None
+        self._store_key: Optional[str] = None
+        self._fragment_source: Optional[str] = None
         self._axes: list = []
         self._save_prefix: str = "EIC"
 
@@ -98,14 +120,33 @@ class EICPlotWidget(QWidget, PanZoomMixin):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_raw_data(self, raw_data: dict):
-        self._raw_data = raw_data
+    def set_eic_store(self, store: Optional[EicStore]):
+        """Point the viewer at an ``alignment.eic``, or at nothing."""
+        self._store = store
 
     def set_view_mode(self, mode: str):
         self._view_mode = mode
 
-    def show_feature(self, feature: Feature):
+    def show_feature(
+        self,
+        feature: Feature,
+        store_key: Optional[str] = None,
+        fragment_source: Optional[str] = None,
+    ):
+        """Draw ``feature``, reading its chromatograms from ``store_key``.
+
+        ``store_key`` addresses the spot in ``alignment.eic``; it is *not*
+        ``feature.feature_id``, which in the single-sample view names a candidate
+        the store has never heard of. ``None`` means no aligned spot claimed this
+        peak, so nothing was ever stored for it.
+
+        ``fragment_source`` is the sample the stored fragment chromatograms were
+        extracted from — the spot's representative, which need not be the sample
+        being viewed.
+        """
         self._current_feature = feature
+        self._store_key = store_key
+        self._fragment_source = fragment_source
         self._save_prefix = f"EIC_{feature.feature_id}_mz{feature.precursor_mz:.4f}"
         self.toolbar.set_save_prefix(self._save_prefix)
         self._redraw()
@@ -115,6 +156,8 @@ class EICPlotWidget(QWidget, PanZoomMixin):
         self._axes = []
         self._default_lims = []
         self._current_feature = None
+        self._store_key = None
+        self._fragment_source = None
         ax = self.fig.add_subplot(111)
         ax.set_title("Select a feature", color=THEME_BLUE)
         self.canvas.draw()
@@ -123,44 +166,59 @@ class EICPlotWidget(QWidget, PanZoomMixin):
     # Drawing
     # ------------------------------------------------------------------
 
+    def _message(self, text: str) -> None:
+        self.fig.clear()
+        self._axes = []
+        ax = self.fig.add_subplot(111)
+        ax.set_title(text, color=THEME_BLUE)
+        self.canvas.draw()
+
     def _redraw(self):
         feature = self._current_feature
         if feature is None:
             return
-        self.fig.clear()
-        self._axes = []
-        self._default_lims = []
 
-        if self._raw_data is None:
-            ax = self.fig.add_subplot(111)
-            ax.set_title("No raw data loaded", color=THEME_BLUE)
-            self.canvas.draw()
+        if self._store is None:
+            self._message("No chromatogram store loaded")
+            return
+        if self._store_key is None:
+            # Only ~3% of candidates land here: the ones no alignment spot
+            # claimed. Gap filling extracts chromatograms per spot, so a peak
+            # outside every spot never had one written.
+            self._message("This peak was not claimed by any alignment spot,\n"
+                          "so no chromatogram was stored")
+            return
+        spot = self._store.get(self._store_key)
+        if spot is None:
+            self._message("No chromatogram stored for this feature")
             return
 
+        self.fig.clear()
+        self._default_lims = []
         ax_ms1 = self.fig.add_subplot(211)
         ax_ms2 = self.fig.add_subplot(212)
         self._axes = [ax_ms1, ax_ms2]
 
         mz = feature.precursor_mz
-        prec_nominal = int(round(mz))
         use_smooth = self._show_smooth
+        sm_tag = "" if use_smooth else " [Raw]"
 
-        reps = (self._raw_data if self._view_mode == "aligned"
-                else {self._view_mode: self._raw_data.get(self._view_mode, [])})
+        traces = [t for t in spot.quant
+                  if self._view_mode == "aligned" or t.label == self._view_mode]
 
-        # --- Top: MS1 EIC ---
+        # --- Top: quantitation-ion EIC, one line per replicate ---
         has_ms1 = False
-        for i, (rep_id, segments) in enumerate(sorted(reps.items())):
-            color = COLORS[i % len(COLORS)]
-            for seg in segments:
-                if not (seg.segment_low <= mz <= seg.segment_high + 1):
-                    continue
-                rt_arr, int_arr = extract_ms1_eic(seg, mz, 0.5)
-                if len(int_arr) > 0 and np.max(int_arr) > 0:
-                    y = smooth_eic(int_arr, "savgol", 7, 3) if use_smooth else int_arr
-                    label = f"MS1 {rep_id}" if len(reps) > 1 else "MS1"
-                    ax_ms1.plot(rt_arr, y, color=color, alpha=0.8, linewidth=1.2, label=label)
-                    has_ms1 = True
+        for i, trace in enumerate(traces):
+            if trace.rt.size == 0 or np.max(trace.intensity) <= 0:
+                continue
+            y = smooth_eic(trace.intensity, "savgol", 7, 3) if use_smooth else trace.intensity
+            label = f"MS1 {trace.label}" if len(traces) > 1 else "MS1"
+            if trace.status != "detected":
+                label += " (gap-filled)"
+            ax_ms1.plot(trace.rt, y, color=COLORS[i % len(COLORS)], alpha=0.8,
+                        linewidth=1.2, label=label,
+                        linestyle="-" if trace.status == "detected" else "--")
+            has_ms1 = True
 
         if not has_ms1:
             ax_ms1.text(0.5, 0.5, "No MS1 signal", transform=ax_ms1.transAxes,
@@ -172,58 +230,39 @@ class EICPlotWidget(QWidget, PanZoomMixin):
         ax_ms1.axvspan(feature.rt_left, feature.rt_right, alpha=0.12, color="orange")
         ax_ms1.axvline(feature.rt, color="red", linestyle=":", alpha=0.4)
         sig = "MS1" if feature.signal_type == "ms1_detected" else "MS2"
-        sm_tag = "" if use_smooth else " [Raw]"
         ax_ms1.set_title(f"MS1 EIC: m/z {mz:.4f} ({sig}){sm_tag}", fontsize=9, color=THEME_BLUE)
         ax_ms1.set_ylabel("Intensity", fontsize=8)
         if has_ms1:
             ax_ms1.legend(fontsize=7, loc="upper right")
 
         # --- Bottom: MS2 product ion EICs ---
-        ms2_mzs = feature.ms2_mz
-        ms2_ints = feature.ms2_intensity
-        n_ions = len(ms2_mzs)
-        max_ions = 8
-
-        if n_ions == 0:
+        fragments = spot.fragments[:MAX_IONS]
+        if not fragments:
             ax_ms2.text(0.5, 0.5, "No MS2 fragments", transform=ax_ms2.transAxes,
                         ha="center", va="center", color="gray", fontsize=10)
         else:
-            top_idx = np.argsort(ms2_ints)[-max_ions:] if n_ions > max_ions else np.arange(n_ions)
-            rep_key = list(reps.keys())[0] if reps else None
-            seg_to_use = None
-            if rep_key and reps.get(rep_key):
-                for seg in reps[rep_key]:
-                    if prec_nominal in seg.precursor_list:
-                        seg_to_use = seg
-                        break
-            if seg_to_use is not None:
-                ion_colors = ["#2D6A9F", "#E05050", "#21A67A", "#F59E0B",
-                              "#8B5CF6", "#FF6B6B", "#4ECDC4", "#95A5A6"]
-                for j, idx in enumerate(top_idx):
-                    ion_mz = ms2_mzs[idx]
-                    eic_int = np.zeros(seg_to_use.n_cycles)
-                    for ci, cycle in enumerate(seg_to_use.cycles):
-                        if prec_nominal in cycle.ms2_scans:
-                            prod_mz, prod_int = cycle.ms2_scans[prec_nominal]
-                            if len(prod_mz) > 0:
-                                mask = np.abs(prod_mz - ion_mz) <= 0.02
-                                if np.any(mask):
-                                    eic_int[ci] = float(np.max(prod_int[mask]))
-                    if np.max(eic_int) > 0:
-                        y = smooth_eic(eic_int, "savgol", 7, 3) if use_smooth else eic_int
-                        ax_ms2.plot(seg_to_use.rt_array, y, color=ion_colors[j % len(ion_colors)],
-                                    alpha=0.7, linewidth=0.9, label=f"{ion_mz:.3f}")
-                ax_ms2.axvspan(
-                    feature.rt_left, feature.rt_right, alpha=0.12, color="orange",
-                )
-                ax_ms2.axvline(feature.rt, color="red", linestyle=":", alpha=0.4)
-                ax_ms2.legend(fontsize=6, loc="upper right", ncol=2,
-                              title="Product m/z", title_fontsize=7)
-            else:
-                ax_ms2.text(0.5, 0.5, "Raw data not available",
-                            transform=ax_ms2.transAxes, ha="center", va="center", color="gray")
+            for j, (product_mz, trace) in enumerate(fragments):
+                if trace.rt.size == 0 or np.max(trace.intensity) <= 0:
+                    continue
+                y = (smooth_eic(trace.intensity, "savgol", 7, 3)
+                     if use_smooth else trace.intensity)
+                ax_ms2.plot(trace.rt, y, color=ION_COLORS[j % len(ION_COLORS)],
+                            alpha=0.7, linewidth=0.9, label=f"{product_mz:.3f}")
+            ax_ms2.axvspan(feature.rt_left, feature.rt_right, alpha=0.12, color="orange")
+            ax_ms2.axvline(feature.rt, color="red", linestyle=":", alpha=0.4)
+            ax_ms2.legend(fontsize=6, loc="upper right", ncol=2,
+                          title="Product m/z", title_fontsize=7)
 
-        ax_ms2.set_title(f"MS2 Product Ion EICs (top {min(n_ions, max_ions)}){sm_tag}",
+        # Gap fill extracts the fragment chromatograms from the representative
+        # sample's raw data only, so in a single-sample view these are quite
+        # possibly not the traces of the sample on screen. Say whose they are;
+        # read as this sample's, they would be MS2 evidence it does not have.
+        source = ""
+        if (fragments and self._view_mode != "aligned"
+                and self._fragment_source
+                and self._fragment_source != self._view_mode):
+            source = f", from sample {self._fragment_source}"
+        ax_ms2.set_title(f"MS2 Product Ion EICs (top {len(fragments)}{source}){sm_tag}",
                          fontsize=9, color=THEME_BLUE)
         ax_ms2.set_xlabel("RT (min)", fontsize=8)
         ax_ms2.set_ylabel("Intensity", fontsize=8)
@@ -262,4 +301,3 @@ class EICPlotWidget(QWidget, PanZoomMixin):
                     ax.set_xlim(saved[i][0])
                     ax.set_ylim(saved[i][1])
                 self.canvas.draw_idle()
-

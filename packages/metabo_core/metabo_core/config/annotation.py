@@ -4,6 +4,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class ConfidenceConfig:
+    """The two thresholds that decide whether a hit counts as high-confidence.
+
+    Kept apart from :class:`AnnotationConfig` because that one is what the
+    *pipeline* matches with (thresholds relaxed so nothing is dropped), whereas
+    these two are what a *reader* judges the emitted hit by. A single object so
+    the ``annotated`` column of an export and any algorithm that needs to know
+    which spots are identified cannot drift apart — see
+    :func:`metabo_core.annotation.is_high_confidence`.
+    """
+
+    score_threshold: float = 0.3
+    min_matched_peaks: int = 3
+
+
 @dataclass
 class AnnotationConfig:
     """Parameters for library annotation.

@@ -171,6 +171,15 @@ def run_stage5b(
                 active[idx].duplicate_group_id = gid
                 if idx != rep_idx:
                     active[idx].is_duplicate = True
+                    # Unlike stages 4/5/6 this one does not move the feature out
+                    # of the active set, so it also never names the redundancy.
+                    # Fill the default here rather than in a later sweep: every
+                    # is_duplicate feature must carry a duplicate_type by the
+                    # time export reads it. Guarded, because an isotope/adduct
+                    # *representative* (already typed, still active) can be
+                    # flagged here and must keep its original type.
+                    if not active[idx].duplicate_type:
+                        active[idx].duplicate_type = "spectral"
                     n_flagged += 1
 
         total_flagged += n_flagged

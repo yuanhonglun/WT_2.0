@@ -16,6 +16,10 @@ from PyQt5.QtCore import Qt
 
 from asfam.config import ProcessingConfig
 
+# Sentinel row in the reference-sample combo. Maps to
+# ``alignment_reference_sample = None`` — pick by S/N quality at align time.
+AUTO_REFERENCE = "Auto (best S/N)"
+
 
 class SetupPanel(QWidget):
     """Left panel: file list, library, output dir, and parameter tabs."""
@@ -183,6 +187,8 @@ class SetupPanel(QWidget):
         # Alignment
         self.config.alignment_rt_tolerance = self.spin_align_rt.value()
         self.config.alignment_mz_tolerance = self.spin_align_mz.value()
+        ref = self.combo_ref_sample.currentText()
+        self.config.alignment_reference_sample = None if ref == AUTO_REFERENCE else ref
         self.config.gap_fill_enabled = self.chk_gapfill.isChecked()
         # Export
         # Export flags always on — handled by stage8.
@@ -336,6 +342,17 @@ class SetupPanel(QWidget):
         self.spin_align_mz = _dbl_spin(self.config.alignment_mz_tolerance, 0.001, 1.0, 0.005, 3)
         form.addRow("Align m/z Tol (Da):", self.spin_align_mz)
 
+        # Seeds the master peak list. Since the master list is a union across
+        # every sample, this only decides who claims a bucket first — a bad
+        # pick no longer costs features.
+        self.combo_ref_sample = QComboBox()
+        self.combo_ref_sample.addItem(AUTO_REFERENCE)
+        self.combo_ref_sample.setToolTip(
+            "Sample that seeds the alignment master list. The master list is a "
+            "union over all samples, so this only sets who claims a peak first."
+        )
+        form.addRow("Reference Sample:", self.combo_ref_sample)
+
         self.chk_gapfill = QCheckBox("Enable Gap Filling")
         self.chk_gapfill.setChecked(self.config.gap_fill_enabled)
         form.addRow(self.chk_gapfill)
@@ -366,8 +383,40 @@ class SetupPanel(QWidget):
             self.file_list.takeItem(self.file_list.row(item))
         self._update_sample_info()
 
+    def _refresh_reference_samples(self):
+        """Repopulate the reference combo with this run's sample ids.
+
+        The ids must be the ones the orchestrator will use, so they come from
+        the same ``group_files_by_sample`` it calls rather than from filenames.
+        A pick that survives the refresh is kept; one whose sample disappeared
+        falls back to Auto.
+        """
+        combo = getattr(self, "combo_ref_sample", None)
+        if combo is None:      # tab not built yet
+            return
+        from asfam.pipeline.stage0_load import group_files_by_sample
+
+        paths = self.get_mzml_paths()
+        try:
+            sample_ids = sorted(group_files_by_sample(paths, self.get_sample_groups())) \
+                if paths else []
+        except RuntimeError:
+            # A filename stage 0 cannot parse. It will report that itself; the
+            # combo just stays at Auto rather than pre-empting the error here.
+            sample_ids = []
+
+        previous = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(AUTO_REFERENCE)
+        combo.addItems(sample_ids)
+        index = combo.findText(previous)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
     def _update_sample_info(self):
         """Update the sample info label after files change."""
+        self._refresh_reference_samples()
         paths = self.get_mzml_paths()
         if not paths:
             self.group_label.setText("No files loaded")
@@ -437,6 +486,10 @@ class SetupPanel(QWidget):
         self.spin_isf_corr.setValue(self.config.isf_eic_pearson_threshold)
         self.spin_align_rt.setValue(self.config.alignment_rt_tolerance)
         self.spin_align_mz.setValue(self.config.alignment_mz_tolerance)
+        self._refresh_reference_samples()
+        ref = self.config.alignment_reference_sample
+        index = self.combo_ref_sample.findText(ref) if ref else -1
+        self.combo_ref_sample.setCurrentIndex(index if index >= 0 else 0)
         self.chk_gapfill.setChecked(self.config.gap_fill_enabled)
         # Export checkboxes removed; nothing to refresh here.
 

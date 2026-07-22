@@ -2,8 +2,10 @@
 import numpy as np
 
 from metabo_core.annotation import (
+    ANNOTATION_METADATA_FIELDS,
     build_index_from_list,
     load_and_index_library,
+    load_library_lean,
     match_feature_topn,
 )
 from metabo_core.config import AnnotationConfig, SimilarityConfig
@@ -184,6 +186,82 @@ def test_load_and_index_library_loads_lean(tmp_path):
     assert matches[0].ref_peaks
     m0, i0 = matches[0].ref_peaks[0]
     assert type(m0) is float and type(i0) is float
+
+
+def test_load_library_lean_honours_custom_keep_set(tmp_path):
+    """A caller-supplied keep-set replaces the LC-MS default.
+
+    GC-MS is EI: it has no ``precursor_mz`` but needs ``inchikey`` and RI.
+    Because ``keep_metadata`` filters on *exact* key names, every alias a
+    caller reads must appear in its keep-set — here ``Retention_index``
+    lands in metadata as ``retention_index`` and would silently vanish if
+    only ``ri`` were listed. Guard both halves of that contract.
+    """
+    text = (
+        "NAME: Limonene\nFORMULA: C10H16\nINCHIKEY: XMGQYMWWDOXHJM\n"
+        "Retention_index: SemiStdNP=1030/4/12\n"
+        "Synon: bulky\nComments: also bulky\nMW: 136\n"
+        "Num Peaks: 2\n68.0 999\n93.0 500\n\n"
+    )
+    path = tmp_path / "ei.msp"
+    path.write_text(text, encoding="utf-8")
+
+    keep = {"name", "formula", "inchikey", "ri", "retention_index"}
+    spectra = load_library_lean(str(path), keep_metadata=keep)
+    assert spectra is not None and len(spectra) == 1
+    meta = spectra[0]["metadata"]
+
+    # The alias is preserved verbatim — the multi-column NIST string is NOT
+    # parsed at load time; the GC-MS stage parses it downstream.
+    assert meta["retention_index"] == "SemiStdNP=1030/4/12"
+    assert meta["inchikey"] == "XMGQYMWWDOXHJM"
+    assert meta["name"] == "Limonene"
+    # Everything outside the keep-set is dropped ...
+    assert "synon" not in meta and "comments" not in meta and "mw" not in meta
+    # ... and the default LC-MS set did not leak in.
+    assert "adduct" not in meta
+    assert isinstance(spectra[0]["mz"], np.ndarray)
+
+    # The default keep-set is untouched by the custom call (frozenset, but
+    # pin it: DDA / ASFAM both depend on this exact set).
+    assert ANNOTATION_METADATA_FIELDS == frozenset(
+        {"name", "precursor_mz", "formula", "adduct", "rt"}
+    )
+
+
+def test_load_library_lean_returns_none_for_unusable_input(tmp_path):
+    """Unsupported extension / empty library / missing file all yield None,
+    which every annotation stage reads as 'skip annotation'."""
+    empty = tmp_path / "empty.msp"
+    empty.write_text("", encoding="utf-8")
+    assert load_library_lean(str(empty)) is None
+
+    wrong_ext = tmp_path / "lib.txt"
+    wrong_ext.write_text("NAME: X\nNum Peaks: 1\n100.0 1\n\n", encoding="utf-8")
+    assert load_library_lean(str(wrong_ext)) is None
+
+    assert load_library_lean(str(tmp_path / "nope.msp")) is None
+
+
+def test_load_and_index_library_is_lean_loader_plus_index(tmp_path):
+    """``load_and_index_library`` is exactly ``build_index_from_list`` over
+    ``load_library_lean`` — pinning the composition so the two paths (DDA's
+    index, ASFAM stage 2.5's flat list) cannot drift apart."""
+    text = (
+        "NAME: Hit\nPRECURSORMZ: 181.0707\nFORMULA: C9H12O4\n"
+        "Num Peaks: 2\n100.0 1000\n150.0 500\n\n"
+    )
+    path = tmp_path / "lib.msp"
+    path.write_text(text, encoding="utf-8")
+
+    indexed = load_and_index_library(str(path))
+    expected = build_index_from_list(load_library_lean(str(path)))
+    assert indexed is not None and expected is not None
+    assert indexed["index"] == expected["index"]
+    assert indexed["spectra"][0]["metadata"] == expected["spectra"][0]["metadata"]
+    np.testing.assert_array_equal(
+        indexed["spectra"][0]["mz"], expected["spectra"][0]["mz"],
+    )
 
 
 def test_match_feature_topn_empty_when_no_index_overlap():

@@ -5,6 +5,7 @@ import pandas as pd
 from asfam.pipeline.stage8_export import _export_csv
 from asfam.config import ProcessingConfig
 from asfam.models import Feature, AnnotationMatch
+from metabo_core.annotation import is_high_confidence
 
 
 def _annotated_feature() -> Feature:
@@ -37,6 +38,27 @@ def test_export_csv_includes_msdial_breakdown_columns(tmp_path):
     assert row["matched_pct"] == 0.95
     assert row["total_score"] == 1.85
     assert row["composite_score"] == 1.85   # composite_score == total_score
+
+
+def test_export_csv_includes_alignment_center_and_relation_columns(tmp_path):
+    feature = _annotated_feature()
+    feature.align_mz = 181.0712
+    feature.representative_rt = 4.98
+    feature.alignment_window = 181
+    feature.alignment_segment = "180-182"
+    feature.alignment_relation = "ms1_covered_partial"
+    feature.alignment_related_feature_id = "F0002"
+    out = tmp_path / "features.csv"
+
+    _export_csv([feature], out, ProcessingConfig())
+    row = pd.read_csv(out, comment="#").iloc[0]
+
+    assert row["alignment_mz"] == 181.0712
+    assert row["representative_rt"] == 4.98
+    assert row["alignment_window"] == 181
+    assert row["alignment_segment"] == "180-182"
+    assert row["alignment_relation"] == "ms1_covered_partial"
+    assert row["alignment_related_feature_id"] == "F0002"
 
 
 def test_export_csv_breakdown_blank_when_unannotated(tmp_path):
@@ -142,3 +164,112 @@ def test_export_csv_sparse_hit_is_suggested_not_annotated(tmp_path):
     hi = pd.read_csv(out2, comment="#").iloc[0]
     assert hi["annotated"] == True
     assert int(hi["n_matched"]) == 4
+
+
+# --- PR-6: detection counts + the shared high-confidence predicate ----------
+
+
+def test_export_csv_has_detection_columns(tmp_path):
+    """``height_rep*`` is non-empty for every cell after gap filling, so the only
+    way to tell a detection from a fill is ``n_detected`` / ``detection_rate``."""
+    feat = _annotated_feature()
+    feat.heights = {"1": 5000.0, "2": 4000.0, "3": 0.0}
+    feat.gap_fill_status = {"1": "detected", "2": "filled", "3": "no_signal"}
+    feat.n_detected = 1
+    feat.detection_rate = 1 / 3
+
+    out = tmp_path / "features.csv"
+    _export_csv([feat], out, ProcessingConfig())
+    df = pd.read_csv(out, comment="#")
+
+    assert df.iloc[0]["n_detected"] == 1
+    assert df.iloc[0]["detection_rate"] == 0.333
+    # The trap: two of three cells carry a positive height, and only one is a
+    # detection.
+    assert sum(df.iloc[0][f"height_rep{r}"] > 0 for r in ("1", "2")) == 2
+
+
+# --- PR-7: the quantitation matrix has no holes, and says what each cell is --
+
+
+def test_export_csv_carries_per_sample_gap_fill_status(tmp_path):
+    """``gap_fill_status`` is a ``sample_id -> str`` map, so it exports one
+    column per sample, alongside ``height_rep{i}`` / ``area_rep{i}``. Without it
+    a reader cannot tell a detection from a fill: after gap filling every
+    height cell is non-empty."""
+    feat = _annotated_feature()
+    feat.heights = {"1": 5000.0, "2": 4000.0, "3": 0.0}
+    feat.areas = {"1": 500.0, "2": 400.0, "3": 0.0}
+    feat.gap_fill_status = {"1": "detected", "2": "filled", "3": "no_signal"}
+
+    out = tmp_path / "features.csv"
+    _export_csv([feat], out, ProcessingConfig())
+    df = pd.read_csv(out, comment="#")
+
+    row = df.iloc[0]
+    assert [row[f"gap_fill_status_rep{r}"] for r in ("1", "2", "3")] == [
+        "detected", "filled", "no_signal",
+    ]
+    # The no_signal cell exports 0, not a blank: a blank is indistinguishable
+    # from "sample missing" and makes pandas read the whole column as object.
+    assert row["height_rep3"] == 0.0
+    assert row["area_rep3"] == 0.0
+
+
+def test_export_csv_fills_a_missing_sample_with_zero_not_blank(tmp_path):
+    """A sample absent from ``heights`` (gap filling off, or the spot never saw
+    it) exports 0 with a blank status — the blank status is what marks the 0 as
+    a placeholder rather than a measured zero."""
+    present = _annotated_feature()
+    present.heights = {"1": 5000.0}
+    present.areas = {"1": 500.0}
+    present.gap_fill_status = {"1": "detected"}
+
+    other = _annotated_feature()
+    other.feature_id = "F0002"
+    other.heights = {"2": 3000.0}
+    other.areas = {"2": 300.0}
+    other.gap_fill_status = {"2": "detected"}
+
+    out = tmp_path / "features.csv"
+    _export_csv([present, other], out, ProcessingConfig())
+    df = pd.read_csv(out, comment="#", keep_default_na=False)
+
+    # Union of sample ids -> both columns exist on both rows, no holes.
+    assert df.iloc[0]["height_rep2"] == 0.0
+    assert df.iloc[0]["area_rep2"] == 0.0
+    assert df.iloc[0]["gap_fill_status_rep2"] == ""
+    assert df.iloc[1]["height_rep1"] == 0.0
+    assert df.iloc[1]["gap_fill_status_rep1"] == ""
+
+    # And the numeric columns really parse as numbers, which a blank would break.
+    assert pd.to_numeric(pd.read_csv(out, comment="#")["height_rep2"]).notna().all()
+
+
+def test_export_annotated_column_uses_the_shared_predicate(tmp_path):
+    """``annotated`` must be exactly what the stage-7 refiner grouped on.
+
+    A sparse hit clears the score floor but not the matched-peak floor, so it
+    keeps its name and score cells and comes out annotated=False — and a rename
+    to "Putative: ..." must not change the answer either way.
+    """
+    config = ProcessingConfig()
+    confidence = config.confidence_view()
+
+    good = _annotated_feature()
+    sparse = _annotated_feature()
+    sparse.feature_id = "F0002"
+    sparse.annotation_matches[0].n_matched = 1
+    renamed = _annotated_feature()
+    renamed.feature_id = "F0003"
+    renamed.name = "Putative: TestHit"
+
+    out = tmp_path / "features.csv"
+    _export_csv([good, sparse, renamed], out, ProcessingConfig())
+    df = pd.read_csv(out, comment="#")
+
+    assert list(df["annotated"]) == [
+        is_high_confidence(f, confidence) for f in (good, sparse, renamed)
+    ] == [True, False, True]
+    assert df.iloc[1]["name"] == "TestHit"          # suggestion keeps its cells
+    assert df.iloc[2]["name"] == "Putative: TestHit"

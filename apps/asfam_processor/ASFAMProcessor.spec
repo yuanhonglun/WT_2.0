@@ -54,6 +54,9 @@ a = Analysis(
             "scipy", "scipy.signal", "scipy.optimize", "scipy.stats",
             "scipy.spatial",
             "pandas",
+            # Native extension; metabo_core.utils.memlog degrades to a warning
+            # without it, so a missing bundle shows up as absent [mem] lines.
+            "psutil",
             "matplotlib",
             "matplotlib.backends.backend_qt5agg",
             "matplotlib.backends.backend_agg",

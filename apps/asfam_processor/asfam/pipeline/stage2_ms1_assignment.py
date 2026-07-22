@@ -193,6 +193,10 @@ def _batch_assign_ms1(
             continue
 
         feat.ms1_precursor_mz = precise_mz
+        feat.ms1_quant_mz = _basepeak_mz(
+            raw_data, peak.apex_index,
+            float(precursor) - 0.5, float(precursor) + 0.5,
+        )
         feat.ms1_height = peak.height
         feat.ms1_area = peak.area
         feat.ms1_sn = peak.sn_ratio
@@ -238,6 +242,33 @@ def _detect_ms1_peaks(
         rt_window_min=config.ms1_peak.rt_window_min,
         rt_window_max=config.ms1_peak.rt_window_max,
     )
+
+
+def _basepeak_mz(
+    raw_data: RawSegmentData,
+    cycle_index: int,
+    mz_low: float,
+    mz_high: float,
+) -> Optional[float]:
+    """m/z of the tallest MS1 centroid in ``[mz_low, mz_high]`` at one cycle.
+
+    ``_detect_ms1_peaks`` quantifies on ``extract_ms1_eic(raw, channel, 0.5)``,
+    whose value at each cycle is exactly this centroid's intensity. So this is
+    the ion the feature's ``ms1_height`` was measured on, and the one gap
+    filling must integrate to produce a comparable number. Its sibling
+    ``extract_ms1_precise_mz`` returns the intensity-weighted centroid of the
+    same window, which is a better *precursor* estimate but lands on empty m/z
+    whenever the window holds more than one ion.
+    """
+    cycle = raw_data.cycles[cycle_index]
+    ms1_mz = cycle.ms1_mz
+    ms1_int = cycle.ms1_intensity
+    if ms1_mz is None or len(ms1_mz) == 0:
+        return None
+    mask = (ms1_mz >= mz_low) & (ms1_mz <= mz_high)
+    if not np.any(mask):
+        return None
+    return float(ms1_mz[mask][int(np.argmax(ms1_int[mask]))])
 
 
 def _extract_isotope_pattern(
@@ -342,6 +373,11 @@ def _try_relaxed_ms1_assign(
     if best_peak.height >= config.ms1_min_height:
         feature.signal_type = "ms1_detected"
         feature.mz_source = "ms1_peak"
+        feature.ms1_quant_mz = _basepeak_mz(
+            raw_data, best_peak.apex_index,
+            float(feature.precursor_mz_nominal) - 0.5,
+            float(feature.precursor_mz_nominal) + 0.5,
+        )
         feature.ms1_height = best_peak.height
         feature.ms1_area = best_peak.area
         feature.ms1_sn = best_peak.sn_ratio

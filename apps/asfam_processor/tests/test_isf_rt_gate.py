@@ -65,5 +65,5 @@ def test_isf_still_called_when_co_apex():
     parent = _feat("parent", _PARENT_MZ, rt_apex=9.21, height=12000.0,
                    ms2_mz=[_CHILD_MZ, 193.0, 300.0])
     run_stage6({"1": [child, parent]}, {"1": [raw]}, cfg)
-    assert child.status == "isf_removed"
+    assert child.status == "isf_excluded"
     assert child.duplicate_type == "isf"

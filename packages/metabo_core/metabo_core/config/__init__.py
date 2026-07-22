@@ -12,8 +12,13 @@ from metabo_core.config.peak_detection import (
     gc_peak_config,
 )
 from metabo_core.config.similarity import SimilarityConfig
-from metabo_core.config.annotation import AnnotationConfig
-from metabo_core.config.alignment import AlignmentConfig
+from metabo_core.config.annotation import AnnotationConfig, ConfidenceConfig
+from metabo_core.config.alignment import (
+    AlignmentConfig,
+    GapFillConfig,
+    JoinerConfig,
+    RefinerConfig,
+)
 from metabo_core.config.reranker import RerankerConfig
 from metabo_core.config.msdial_peak_spotting import (
     MsdialPeakSpottingConfig,
@@ -32,7 +37,11 @@ __all__ = [
     "gc_peak_config",
     "SimilarityConfig",
     "AnnotationConfig",
+    "ConfidenceConfig",
     "AlignmentConfig",
+    "GapFillConfig",
+    "JoinerConfig",
+    "RefinerConfig",
     "RerankerConfig",
     "MsdialPeakSpottingConfig",
     "lc_msdial_config",

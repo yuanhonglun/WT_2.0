@@ -113,7 +113,7 @@ def run_stage5(
                 active[idx].duplicate_group_id = group_id + 100000  # offset to avoid collision with isotope ids
                 active[idx].duplicate_type = "adduct"
                 if idx != rep_idx:
-                    active[idx].status = "adduct_removed"
+                    active[idx].status = "adduct_excluded"
                     active[idx].is_duplicate = True
                     # Try to assign adduct type from labels
                     key1 = (min(idx, rep_idx), max(idx, rep_idx))

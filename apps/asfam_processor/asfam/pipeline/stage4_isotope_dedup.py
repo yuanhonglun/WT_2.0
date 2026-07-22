@@ -240,7 +240,7 @@ def run_stage4(
                     int(round(delta / C13_DELTA)) if delta > 0 else 0
                 )
                 if idx != rep_idx:
-                    active[idx].status = "isotope_removed"
+                    active[idx].status = "isotope_excluded"
                     active[idx].is_duplicate = True
                     n_removed += 1
             group_id += 1
