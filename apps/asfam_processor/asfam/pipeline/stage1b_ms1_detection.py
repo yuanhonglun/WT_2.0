@@ -149,7 +149,7 @@ def _process_segment_ms1(
     if config.peak_detector == "msdial":
         # MS-DIAL faithful detector: fixed-0.1Da SUM mass-slice EIC +
         # derivative engine + coarse→fine recalc. Honour stage1b's amplitude
-        # floor (ms1_min_height) the same way the metra branch does, so the
+        # floor (ms1_min_height) the same way the builtin branch does, so the
         # A/B compares algorithm, not threshold.
         msdial_cfg = replace(config.msdial_peak, min_amplitude=config.ms1_min_height)
         hits = find_lc_ms1_features_msdial(scans, config=msdial_cfg)
@@ -434,7 +434,7 @@ def _collect_ms2_at_peak(
     if n_pts <= 0:
         return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
 
-    # ms2_deconv dispatch (镜像 peak_detector "metra"/"msdial"): "msdec" (档 C)
+    # ms2_deconv dispatch (镜像 peak_detector "builtin"/"msdial"): "msdec" (档 C)
     # 走 MS-DIAL MSDec, 产品离子集 = 前体 apex 单 scan 谱 (见 _collect_ms2_msdec),
     # 与档 B 的区间并集路径正交; "apex" (档 B 默认) 继续走下方 Pass1/2/3。
     if config.ms2_deconv == "msdec":

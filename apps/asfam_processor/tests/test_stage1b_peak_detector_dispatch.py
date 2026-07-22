@@ -1,7 +1,7 @@
-"""Task 3.2: Stage 1b peak_detector dispatch — metra vs msdial A/B tests.
+"""Task 3.2: Stage 1b peak_detector dispatch — builtin vs msdial A/B tests.
 
 Verifies that ``ProcessingConfig.peak_detector`` correctly routes stage1b's
-MS1-driven finder to either the existing metra mass-slice ROI path or the
+MS1-driven finder to either the existing builtin mass-slice ROI path or the
 MS-DIAL faithful derivative-engine path, and that BOTH paths can find the same
 clean Gaussian MS1 ion on a shared synthetic fixture.
 
@@ -111,28 +111,28 @@ def _make_fixture():
 
 
 # ---------------------------------------------------------------------------
-# Test 1: metra default mode finds the feature
+# Test 1: builtin default mode finds the feature
 # ---------------------------------------------------------------------------
 
-def test_metra_mode_default_finds_feature():
-    """metra branch (explicitly selected) finds ≥1 feature.
+def test_builtin_mode_default_finds_feature():
+    """builtin branch (explicitly selected) finds ≥1 feature.
 
-    Pins the metra mass-slice-ROI behaviour on this fixture so any future
-    regression in the metra branch is caught. (Default is now msdial, so the
-    metra branch is selected explicitly here.)
+    Pins the builtin mass-slice-ROI behaviour on this fixture so any future
+    regression in the builtin branch is caught. (Default is now msdial, so the
+    builtin branch is selected explicitly here.)
     """
     raw, cfg = _make_fixture()
-    cfg.peak_detector = "metra"  # explicit: exercise the metra branch (default is now msdial)
+    cfg.peak_detector = "builtin"  # explicit: exercise the builtin branch (default is now msdial)
 
     feats = _run_stage1b(raw, cfg)
     ms1_driven = [f for f in feats if f.detection_source == "ms1_driven"]
 
     assert len(ms1_driven) >= 1, (
-        f"metra mode expected ≥1 ms1_driven feature, got 0; feats={feats}"
+        f"builtin mode expected ≥1 ms1_driven feature, got 0; feats={feats}"
     )
     mzs = [f.ms1_precursor_mz for f in ms1_driven]
     assert any(abs(mz - 301.10) < 0.1 for mz in mzs), (
-        f"metra: expected mz_centroid ≈ 301.10 (±0.1), got {mzs}"
+        f"builtin: expected mz_centroid ≈ 301.10 (±0.1), got {mzs}"
     )
 
 
@@ -144,7 +144,7 @@ def test_msdial_mode_finds_feature():
     """peak_detector='msdial' routes to find_lc_ms1_features_msdial; must find ≥1.
 
     MS-DIAL's fixed-0.1 Da SUM-slice + derivative-engine path; the centroid
-    (basePeakMz) may differ slightly from metra's, so the m/z tolerance is
+    (basePeakMz) may differ slightly from the builtin detector's, so the m/z tolerance is
     kept generous (±0.2 Da).  The point is that the dispatch reaches the new
     detector without error AND it finds the clean Gaussian ion.
     """
@@ -167,7 +167,7 @@ def test_msdial_mode_finds_feature():
 # Test 3: both modes run without error and each returns ≥1 feature
 # ---------------------------------------------------------------------------
 
-def test_metra_and_msdial_both_run():
+def test_builtin_and_msdial_both_run():
     """Sanity check: running both modes on identical fixture each returns ≥1 feature.
 
     Proves the dispatch branch works in both directions and neither code path
@@ -175,11 +175,11 @@ def test_metra_and_msdial_both_run():
     """
     raw, _ = _make_fixture()
 
-    cfg_metra = ProcessingConfig()
-    cfg_metra.msms_relative_threshold = 0.0
-    cfg_metra.peak_detector = "metra"  # explicit: default is now msdial
-    feats_metra = _run_stage1b(raw, cfg_metra)
-    ms1_metra = [f for f in feats_metra if f.detection_source == "ms1_driven"]
+    cfg_builtin = ProcessingConfig()
+    cfg_builtin.msms_relative_threshold = 0.0
+    cfg_builtin.peak_detector = "builtin"  # explicit: default is now msdial
+    feats_builtin = _run_stage1b(raw, cfg_builtin)
+    ms1_builtin = [f for f in feats_builtin if f.detection_source == "ms1_driven"]
 
     cfg_msdial = ProcessingConfig()
     cfg_msdial.msms_relative_threshold = 0.0
@@ -187,8 +187,8 @@ def test_metra_and_msdial_both_run():
     feats_msdial = _run_stage1b(raw, cfg_msdial)
     ms1_msdial = [f for f in feats_msdial if f.detection_source == "ms1_driven"]
 
-    assert len(ms1_metra) >= 1, (
-        f"metra mode returned 0 ms1_driven features (sanity); all feats: {feats_metra}"
+    assert len(ms1_builtin) >= 1, (
+        f"builtin mode returned 0 ms1_driven features (sanity); all feats: {feats_builtin}"
     )
     assert len(ms1_msdial) >= 1, (
         f"msdial mode returned 0 ms1_driven features (sanity); all feats: {feats_msdial}"

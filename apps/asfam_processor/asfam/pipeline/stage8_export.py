@@ -26,7 +26,7 @@ import numpy as np
 
 from asfam.config import ProcessingConfig
 from asfam.models import Feature
-from metabo_core import __version__ as METRA_VERSION
+from metabo_core import __version__ as SOFTWARE_VERSION
 from metabo_core.annotation import is_high_confidence
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         row["rt_right"] = round(f.rt_right, 3)
         row["signal_type"] = f.signal_type
         # PR-E: detection provenance (ms1_driven / ms2_driven / both) — consumed
-        # by the MS-DIAL comparison tool's "METRA 特色净增" (net-add) metric.
+        # by the MS-DIAL comparison tool's net-add metric (features only this pipeline finds).
         row["detection_source"] = f.detection_source
         row["mean_height"] = round(f.mean_height, 1)
         row["mean_area"] = round(f.mean_area, 1)
@@ -212,7 +212,7 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
     # 头注释 + 写出。
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write("# mode=asfam\n")
-        fh.write(f"# version={METRA_VERSION}\n")
+        fh.write(f"# version={SOFTWARE_VERSION}\n")
         fh.write("# chromatographic_mode=lc\n")
         df.to_csv(fh, index=False, lineterminator="\n")
 
@@ -261,7 +261,7 @@ def _export_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("=" * 60 + "\n")
-        f.write("METRA — ASFAM Processing Report\n")
+        f.write("ASFAM Processing Report\n")
         f.write("=" * 60 + "\n\n")
         for stage, stats in sorted(stage_stats.items()):
             f.write(f"--- {stage} ---\n")

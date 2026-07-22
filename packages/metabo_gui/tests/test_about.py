@@ -29,12 +29,12 @@ def test_show_about_dialog_does_not_crash(qapp, monkeypatch):
 
     show_about_dialog(
         None,
-        app_name="METRA — ASFAM",
+        app_name="ASFAM Processor",
         version="9.9.99",
         description="A test description.",
     )
-    assert "METRA — ASFAM v9.9.99" in captured["body"]
+    assert "ASFAM Processor v9.9.99" in captured["body"]
     assert "Honglun Yuan" in captured["body"]
     assert "yuanhonglun@hotmail.com" in captured["body"]
     assert "Hainan University" in captured["body"]
-    assert captured["title"] == "About METRA — ASFAM"
+    assert captured["title"] == "About ASFAM Processor"

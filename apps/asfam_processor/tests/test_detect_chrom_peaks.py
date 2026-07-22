@@ -40,18 +40,18 @@ def _gaussian_eic(height, sigma_scans, n=120, total_time=3.0, center_frac=0.5):
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — metra route is a pure pass-through
+# Test 1 — builtin route is a pure pass-through
 # ---------------------------------------------------------------------------
 
-def test_metra_route_matches_detect_peaks_directly():
-    """metra routing is byte-for-byte identical to calling detect_peaks directly.
+def test_builtin_route_matches_detect_peaks_directly():
+    """builtin routing is byte-for-byte identical to calling detect_peaks directly.
 
-    With config.peak_detector="metra" (default), detect_chrom_peaks must
+    With config.peak_detector="builtin" (default), detect_chrom_peaks must
     forward ALL kwargs unchanged to detect_peaks and return the same result.
     """
     rt, y = _gaussian_eic(height=10000, sigma_scans=10)  # sigma ≈ 0.25 min
-    cfg = replace(ProcessingConfig(), peak_detector="metra")  # default is now msdial
-    assert cfg.peak_detector == "metra"
+    cfg = replace(ProcessingConfig(), peak_detector="builtin")  # default is now msdial
+    assert cfg.peak_detector == "builtin"
 
     shared_kwargs = dict(
         min_amplitude=200,
@@ -67,7 +67,7 @@ def test_metra_route_matches_detect_peaks_directly():
     direct = detect_peaks(rt, y, **shared_kwargs)
 
     assert len(routed) == len(direct), (
-        f"metra route returned {len(routed)} peaks, direct returned {len(direct)}"
+        f"builtin route returned {len(routed)} peaks, direct returned {len(direct)}"
     )
     for r, d in zip(routed, direct):
         assert r.apex_index == d.apex_index, (

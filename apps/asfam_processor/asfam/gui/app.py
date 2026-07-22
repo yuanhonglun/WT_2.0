@@ -23,7 +23,7 @@ def global_exception_handler(exc_type, exc_value, exc_tb):
     try:
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.critical(
-            None, "METRA — ASFAM Crash",
+            None, "ASFAM Processor Crash",
             f"An unexpected error occurred:\n\n{exc_value}\n\n"
             f"Details have been logged to:\n{_log_file}\n\n"
             f"Please report this issue.",
@@ -50,7 +50,7 @@ def main():
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("METRA — ASFAM")
+    app.setApplicationName("ASFAM Processor")
     from asfam import __version__
     app.setApplicationVersion(__version__)
 

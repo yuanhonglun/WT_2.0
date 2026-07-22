@@ -9,7 +9,7 @@ contribute the peaks it alone saw, which is what stopped 34% of them from being
 silently dropped. The price is that one compound whose m/z or RT drifts a little
 between samples can seed two master peaks and come out as two adjacent spots.
 MS-DIAL solves that by returning only the spots that reached ``cSpots`` — the
-rest are gone. METRA never deletes a feature (decision D1), so the losers are
+rest are gone. ASFAM never deletes a feature (decision D1), so the losers are
 marked ``is_duplicate`` with ``duplicate_type = "cross_sample_redundant"``
 instead, and every downstream reader filters on that column.
 
@@ -43,7 +43,7 @@ Four pieces, in order:
 order: the identified ones first, ranked by TotalScore, then everything else by
 mean height. A spot lands within the m/z and RT gate of a slot already taken?
 It is redundant. MS-DIAL runs four such loops (MSP hit, any reference hit,
-TextDB hit, unidentified) — METRA has one library, so the first three collapse
+TextDB hit, unidentified) — ASFAM has one library, so the first three collapse
 into one. One master list **per route**, for the reason above.
 
 *MS1 coverage.* The cross-route pass, over what the first one left visible.
@@ -51,7 +51,7 @@ into one. One master list **per route**, for the reason above.
 *Name deduplication.* One compound reported twice under one name is worse than
 useless. The lower-scoring spot is renamed ``"Putative: <name>"`` — nothing else
 about it changes, not its quantitation and not its ``annotation_matches``.
-MS-DIAL deduplicates by library id, then InChIKey, then name; METRA's
+MS-DIAL deduplicates by library id, then InChIKey, then name; ASFAM's
 ``AnnotationMatch`` carries neither id nor InChIKey, so only the name pass
 survives the port.
 
@@ -101,7 +101,7 @@ CROSS_SAMPLE_REDUNDANT = "cross_sample_redundant"
 #: :data:`CROSS_SAMPLE_REDUNDANT`: that one says "the union master list emitted
 #: this compound twice", this one says "MS1 saw this compound, so its MS2-only row
 #: is not an MS2-only detection". A reader that cannot tell the two apart cannot
-#: count either — and the second is exactly the row METRA's MS2-only claim rests
+#: count either — and the second is exactly the row ASFAM's MS2-only claim rests
 #: on.
 MS1_COVERED = "ms1_covered"
 MS1_COVERED_PARTIAL = "ms1_covered_partial"
@@ -346,7 +346,7 @@ def mark_cross_sample_redundant(
 ) -> None:
     """Mark, but never drop, the spots that duplicate a better one nearby.
 
-    Placement order is MS-DIAL's, collapsed from four loops to two because METRA
+    Placement order is MS-DIAL's, collapsed from four loops to two because ASFAM
     matches against a single library:
 
     1. identified spots, best TotalScore first (``:32-44``);
@@ -427,7 +427,7 @@ def mark_ms1_covered(
 
     The question is **not** "are these the same peak" — they are not, they are two
     ions of one compound, measured on two chromatograms. It is "has MS1 seen this
-    compound anywhere in the run", because a visible ``ms2_only`` row is METRA's
+    compound anywhere in the run", because a visible ``ms2_only`` row is ASFAM's
     claim that it has *not*, and that claim is what the MS2-only count means.
 
     So: no m/z is compared. A product row is covered when a visible MS1 row sits

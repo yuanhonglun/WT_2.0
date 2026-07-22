@@ -1,7 +1,7 @@
 [project]
 name = "asfam-processor"
 dynamic = ["version"]
-description = "METRA — ASFAM (All-ion Stepwise Fragmentation Acquisition Mode) LC-QTOF data processor"
+description = "ASFAM Processor (All-ion Stepwise Fragmentation Acquisition Mode) LC-QTOF data processor"
 requires-python = ">=3.9"
 dependencies = [
     "metabo-core",

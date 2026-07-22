@@ -7,10 +7,8 @@ aligned, gap-filled, annotated feature tables and spectral libraries.
 ASFAM acquires high-resolution MS2 spectra through **1 Da HR-MRM stepping
 windows** across the full precursor range, so that virtually every precursor
 ion is fragmented with substantially reduced chimericity. This repository is the
-data-processing engine for the WT 2.0 widely-targeted metabolomics workflow. It
-is the ASFAM mode of the **METRA** platform (*Metabolomics Engine for Trace
-Reconstruction and Analysis*), packaged here as a standalone, self-contained
-project.
+data-processing engine for the WT 2.0 widely-targeted metabolomics workflow,
+packaged as a standalone, self-contained project.
 
 > 📖 **Full documentation:** see [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for
 > installation, a GUI walkthrough, the complete CLI reference, the

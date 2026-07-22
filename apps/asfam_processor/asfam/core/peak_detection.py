@@ -2,7 +2,7 @@
 
 Re-exports the shared metabo_core ``detect_peaks`` and adds
 ``detect_chrom_peaks``, a thin router that dispatches a single-EIC
-chromatogram peak detection to either the metra detector (``detect_peaks``)
+chromatogram peak detection to either the builtin detector (``detect_peaks``)
 or the faithful MS-DIAL derivative engine, based on ``config.peak_detector``.
 """
 from dataclasses import replace
@@ -21,11 +21,11 @@ def detect_chrom_peaks(rt_array, intensity_array, *, config, **detect_kwargs):
     = 50, stage1b = ms1_min_height) is the SAME for both detectors — keeping the
     A/B about algorithm, not threshold. (Without this override the msdial branch
     would use MsdialPeakSpottingConfig's default 1000 and suppress MS2 peaks for a
-    threshold reason, muddying the comparison.) The metra-only kwargs
+    threshold reason, muddying the comparison.) The builtin-only kwargs
     (gaussian_threshold / sn_fold / min_prominence_ratio / rt_window_*) are
     ignored by the msdial branch.
 
-    The metra branch forwards ALL kwargs to ``detect_peaks`` unchanged, so metra
+    The builtin branch forwards ALL kwargs to ``detect_peaks`` unchanged, so the builtin
     output is byte-for-byte identical to calling ``detect_peaks`` directly.
     """
     if config.peak_detector == "msdial":

@@ -15,7 +15,7 @@ from metabo_gui.logging_setup import quiet_noisy_libraries
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="asfam",
-        description="METRA — ASFAM mode: All-ion Stepwise Fragmentation Acquisition LC-QTOF data processor",
+        description="ASFAM Processor mode: All-ion Stepwise Fragmentation Acquisition LC-QTOF data processor",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(

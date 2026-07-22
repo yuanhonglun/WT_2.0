@@ -2,7 +2,7 @@
 
 Ported from ``LcmsPeakJoiner.cs`` (master list ``:69-123``, claim ``:140-166``)
 and ``DataObjConverter.cs:183-196`` (per-spot representative), with one
-deliberate departure: the claim score keeps METRA's MS2 cosine term.
+deliberate departure: the claim score keeps ASFAM's MS2 cosine term.
 
 **Peaks are matched on the ion they were quantified on** — ``align_mz``, and
 never ``precursor_mz``. MS-DIAL can align on the precursor because in DDA a

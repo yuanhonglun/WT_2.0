@@ -26,15 +26,15 @@ from metabo_core.io.mzml import (
 from metabo_core.models import Scan
 
 
-# Local-data test: point ``METRA_TEST_MZML`` at a DDA mzML file to enable it.
+# Local-data test: point ``ASFAM_TEST_MZML`` at a DDA mzML file to enable it.
 # Skipped by default, since no raw data ships with this repository.
-_REAL_DDA_ENV = os.environ.get("METRA_TEST_MZML", "")
+_REAL_DDA_ENV = os.environ.get("ASFAM_TEST_MZML", "")
 REAL_DDA = Path(_REAL_DDA_ENV) if _REAL_DDA_ENV else None
 
 
 pytestmark = pytest.mark.skipif(
     REAL_DDA is None or not REAL_DDA.exists(),
-    reason="real DDA mzML not present (set METRA_TEST_MZML to enable)",
+    reason="real DDA mzML not present (set ASFAM_TEST_MZML to enable)",
 )
 
 

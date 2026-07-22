@@ -73,7 +73,7 @@ class ProcessingConfig:
     ms1_peak: PeakDetectionConfig = field(default_factory=lc_ms1_peak_config)
     ms2_peak: PeakDetectionConfig = field(default_factory=lc_ms2_peak_config)
     # ------------------------------------------------------------------
-    # Peak-detector mode (Phase 3, MS-DIAL port). ``metra`` keeps the
+    # Peak-detector mode (Phase 3, MS-DIAL port). ``builtin`` keeps the
     # current mass-slice ROI + detect_peaks behaviour byte-for-byte;
     # ``msdial`` (now the DEFAULT, Phase 4 validated) routes stage1b/stage1/stage2 through the faithful
     # MS-DIAL derivative engine + fixed-0.1Da SUM mass-slice orchestrator.
@@ -81,7 +81,7 @@ class ProcessingConfig:
     # (metabo_core.config.MsdialPeakSpottingConfig), sourced from
     # ``lc_msdial_config`` so DDA / DIA can reuse the same defaults.
     # ------------------------------------------------------------------
-    peak_detector: Literal["metra", "msdial"] = "msdial"
+    peak_detector: Literal["builtin", "msdial"] = "msdial"
     msdial_peak: MsdialPeakSpottingConfig = field(default_factory=lc_msdial_config)
     rt_cluster_tolerance: float = 0.02  # min, for grouping co-eluting ions
     cluster_max_apex_span: float = 0.05  # min, max span of apex RTs within a cluster
@@ -124,7 +124,7 @@ class ProcessingConfig:
     #   - 故定 300：在保住总数 > 1436 的前提下尽量收紧弱尾噪声。
     #   注：这是钝化处理（同时丢掉部分真·弱峰）。彻底解法是"噪声感知门"
     #   （raw-EIC S/N + 连续背景 grass 拒绝器，保留真弱峰、只杀背景通道），
-    #   属算法层改造，见 docs/validation/2026-06-24-msdial-vs-metra.md §6.4
+    #   属算法层改造，见 内部验证记录 §6.4
     #   的升级建议（PR-C 后续）。
     ms1_min_height: float = 500.0  # MS-DIAL-parity floor: MS-DIAL's ASFAM export keeps Height>=500. Lowered from Phase-4 "floor1000" on 2026-06-26 by user decision — the full-range recall check (docs/validation/2026-06-26-recall-vs-msdial.md) found 55.6% of un-recalled MS-DIAL peaks sit in the 500–1000 band that floor1000 excluded (raw recall 78.7% vs 87.1% at floor parity), almost all at low m/z; 500 recovers that weak low-m/z tail to match MS-DIAL. Trade-off: re-admits some low-amplitude features (the <300 "grass" audit above still argues against going below ~300; 500 stays clear of it). NOTE: not yet re-validated on a fresh floor500 run — val_260626 was floor1000.
     # Stage 1b MS2 product-ion deconvolution (问题 B, MS-DIAL DIA MSDec-aligned).

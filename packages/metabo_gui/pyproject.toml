@@ -1,7 +1,7 @@
 [project]
 name = "metabo-gui"
 dynamic = ["version"]
-description = "METRA GUI — shared Qt building blocks (theme, canvas mixin, dialogs, IO helpers)"
+description = "ASFAM GUI — shared Qt building blocks (theme, canvas mixin, dialogs, IO helpers)"
 requires-python = ">=3.9"
 dependencies = [
     "metabo-core",

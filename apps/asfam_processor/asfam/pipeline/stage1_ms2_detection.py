@@ -91,8 +91,8 @@ def _process_one_file(
         # Detect peaks in each EIC
         all_peaks = []
         for eic in filtered_eics:
-            # Detect peaks (router → metra detect_peaks or MS-DIAL engine by
-            # config.peak_detector; metra path is byte-for-byte unchanged).
+            # Detect peaks (router → builtin detect_peaks or MS-DIAL engine by
+            # config.peak_detector; builtin path is byte-for-byte unchanged).
             peaks = detect_chrom_peaks(
                 eic.rt_array,
                 eic.intensity_array,

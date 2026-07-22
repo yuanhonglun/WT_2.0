@@ -42,8 +42,8 @@ class _UpdateChecker(QThread):
     def run(self):
         try:
             import urllib.request, json
-            url = "https://api.github.com/repos/yuanhonglun-lab/Metra/releases/latest"
-            req = urllib.request.Request(url, headers={"User-Agent": "METRA"})
+            url = "https://api.github.com/repos/yuanhonglun/WT_2.0/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "ASFAMProcessor"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("v")
@@ -60,7 +60,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"METRA — ASFAM v{__version__}")
+        self.setWindowTitle(f"ASFAM Processor v{__version__}")
         self.resize(1400, 900)
 
         # Set icon — shared platform asset (Plan F-followup-3 #6).
@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
     def _show_update_dialog(self, version: str, url: str):
         QMessageBox.information(
             self, "Update Available",
-            f"A new version (v{version}) of METRA — ASFAM is available.\n\n"
+            f"A new version (v{version}) of ASFAM Processor is available.\n\n"
             f"Download: {url}",
         )
 
@@ -639,7 +639,7 @@ class MainWindow(QMainWindow):
             FeatureStatusDelegate, FeedbackController, FeedbackStore, NotesDock,
             load_alongside,
         )
-        from metabo_core import __version__ as _metra_version
+        from metabo_core import __version__ as _software_version
 
         # 1. Load existing sidecar or create a fresh store
         store = load_alongside(project_path)
@@ -648,7 +648,7 @@ class MainWindow(QMainWindow):
             store = FeedbackStore(
                 schema_version=1,
                 app="asfam",
-                metra_version=_metra_version,
+                software_version=_software_version,
                 run_context=ctx,
                 entries=[],
             )
@@ -687,7 +687,7 @@ class MainWindow(QMainWindow):
         """Build a RunContext from the current window state."""
         from dataclasses import asdict
         from metabo_gui.feedback import build_run_context
-        from metabo_core import __version__ as _metra_version
+        from metabo_core import __version__ as _software_version
 
         # Prefer the orchestrator's run_context if the pipeline has run
         orch = None
@@ -700,7 +700,7 @@ class MainWindow(QMainWindow):
 
         return build_run_context(
             app="asfam",
-            metra_version=_metra_version,
+            software_version=_software_version,
             input_files=self._mzml_paths or [],
             library_path=self._library_path,
             project_file=project_path,
@@ -927,11 +927,12 @@ class MainWindow(QMainWindow):
         from asfam import __version__
         show_about_dialog(
             self,
-            app_name="METRA — ASFAM",
+            app_name="ASFAM Processor",
             version=__version__,
             description=(
-                "ASFAM mode of the METRA platform — processes All-ion Stepwise "
-                "Fragmentation Acquisition LC-QTOF mass spectrometry data."
+                "WT 2.0 data-processing engine — processes All-ion Stepwise "
+                "Fragmentation Acquisition Mode (ASFAM) LC-QTOF mass "
+                "spectrometry data."
             ),
         )
 

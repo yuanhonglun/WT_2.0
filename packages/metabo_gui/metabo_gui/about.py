@@ -1,4 +1,4 @@
-"""Standard About dialog factory used across all METRA apps.
+"""Standard About dialog factory used across all apps in this project.
 
 The author / institution / license / email block is built into the
 default text so each app only has to supply its own short description.
@@ -33,7 +33,7 @@ def show_about_dialog(
     Parameters
     ----------
     app_name : str
-        Display name (e.g. "METRA — ASFAM", "METRA — GC-MS").
+        Display name (e.g. "ASFAM Processor").
     version : str
         Release version string (typically ``metabo_core.__version__``).
     description : str

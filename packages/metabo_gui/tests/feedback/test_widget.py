@@ -12,7 +12,7 @@ pytest.importorskip("PyQt5")
 def controller(qapp, tmp_path):
     from metabo_gui.feedback.controller import FeedbackController
     from metabo_gui.feedback.models import FeedbackStore, RunContext
-    ctx = RunContext(app="dda", metra_version="0", run_timestamp="t",
+    ctx = RunContext(app="dda", software_version="0", run_timestamp="t",
                      input_files=[], input_root="", library_path=None,
                      project_file=str(tmp_path / "x.dda"), export_dir=None, params={})
     store = FeedbackStore(1, "dda", "0", ctx, [])
