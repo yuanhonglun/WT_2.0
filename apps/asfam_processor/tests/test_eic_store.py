@@ -106,7 +106,7 @@ def test_temporaries_are_removed_even_when_the_fill_dies(tmp_path):
             writer.add_sample(iter([SpotChromatograms(quant=[_trace("s1")])]))
             raise RuntimeError("gap fill cancelled")
 
-    assert list(tmp_path.glob("metra_eic_*")) == []
+    assert list(tmp_path.glob("asfam_eic_*")) == []
     assert not (tmp_path / "alignment.eic").exists()
 
 

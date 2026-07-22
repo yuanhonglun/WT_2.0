@@ -67,7 +67,7 @@ def test_delegate_renders_without_crashing(qapp):
     )
     from metabo_gui.feedback.status_column import FeatureStatusDelegate
 
-    ctx = RunContext(app="dda", metra_version="0", run_timestamp="t",
+    ctx = RunContext(app="dda", software_version="0", run_timestamp="t",
                      input_files=[], input_root="", library_path=None,
                      project_file=None, export_dir=None, params={})
     store = FeedbackStore(1, "dda", "0", ctx, [

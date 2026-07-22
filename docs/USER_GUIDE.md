@@ -41,10 +41,8 @@ detects features from **both** the MS1 and MS2 channels, so it recovers
 spectra but no confidently detectable precursor signal — in addition to the
 conventional MS1-driven features.
 
-This project is the ASFAM mode of the **METRA** platform (*Metabolomics Engine
-for Trace Reconstruction and Analysis*). It is distributed here as a
-self-contained repository containing only the ASFAM pipeline and the shared core
-and GUI libraries it depends on.
+It is distributed as a self-contained repository containing the ASFAM pipeline
+and the shared core and GUI libraries it depends on — nothing else is required.
 
 ### Two design decisions worth knowing before you start
 
@@ -182,7 +180,7 @@ index, the intermediate `_work/` directory, and a report under `_debug/`.
 
 Start the GUI with `python -m asfam.gui.app` (or run `ASFAMProcessor.exe` from a
 release build). The window title shows the running version, e.g.
-`METRA — ASFAM v1.2.260721`. The interface is available in **English and
+`ASFAM Processor v1.2.260721`. The interface is available in **English and
 Chinese**; the choice is persisted between sessions.
 
 ### Toolbar
@@ -289,7 +287,7 @@ and save them (GUI). Roughly, the config surface covers:
 
 - **General** — ionization mode, worker count.
 - **MS2 detection (Stage 1)** — product-ion EIC m/z tolerance, smoothing, the
-  peak detector (`msdial`, the default, or `metra`), RT clustering tolerance,
+  peak detector (`msdial`, the default, or `builtin`), RT clustering tolerance,
   minimum fragments per feature, shape-correlation gate, and the weak-ion recall
   pass.
 - **MS1 detection and deconvolution** — MS-DIAL peak-spotting parameters,

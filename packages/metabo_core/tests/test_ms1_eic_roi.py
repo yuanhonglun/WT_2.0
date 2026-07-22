@@ -161,15 +161,15 @@ def test_slow_drift_stays_one_roi():
 # ---------------------------------------------------------------------------
 
 
-# Local-data smoke test: point ``METRA_TEST_MZML`` at an mzML file to enable it.
+# Local-data smoke test: point ``ASFAM_TEST_MZML`` at an mzML file to enable it.
 # Skipped by default, since no raw data ships with this repository.
-_REAL_MZML_ENV = os.environ.get("METRA_TEST_MZML", "")
+_REAL_MZML_ENV = os.environ.get("ASFAM_TEST_MZML", "")
 _REAL_MZML = Path(_REAL_MZML_ENV) if _REAL_MZML_ENV else None
 
 
 @pytest.mark.skipif(
     _REAL_MZML is None or not _REAL_MZML.exists(),
-    reason="real mzML not present (set METRA_TEST_MZML to enable)",
+    reason="real mzML not present (set ASFAM_TEST_MZML to enable)",
 )
 def test_real_dda_mzml_smoke():
     """用真实 mzML 检验性能 + 输出量级。"""

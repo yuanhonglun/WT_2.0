@@ -320,11 +320,11 @@ class PipelineOrchestrator:
         try:
             from dataclasses import asdict
             from metabo_gui.feedback import build_run_context
-            from metabo_core import __version__ as _metra_version
+            from metabo_core import __version__ as _software_version
 
             self.run_context = build_run_context(
                 app="asfam",
-                metra_version=_metra_version,
+                software_version=_software_version,
                 input_files=mzml_paths,
                 library_path=spectral_library_path,
                 project_file=None,
@@ -335,7 +335,7 @@ class PipelineOrchestrator:
             logger.warning("Failed to build run context (non-fatal)", exc_info=True)
 
         logger.info("=" * 60)
-        logger.info("METRA — ASFAM Pipeline Starting")
+        logger.info("ASFAM Processor Pipeline Starting")
         logger.info("  Files: %d", len(mzml_paths))
         logger.info("  Output: %s", output_dir)
         logger.info("  Mode: %s", self.config.ionization_mode)

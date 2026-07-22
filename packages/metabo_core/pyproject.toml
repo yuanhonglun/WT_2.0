@@ -1,7 +1,7 @@
 [project]
 name = "metabo-core"
 dynamic = ["version"]
-description = "METRA core — shared metabolomics algorithms (similarity, peak picking, library matching, alignment)"
+description = "ASFAM core — shared metabolomics algorithms (similarity, peak picking, library matching, alignment)"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.21",

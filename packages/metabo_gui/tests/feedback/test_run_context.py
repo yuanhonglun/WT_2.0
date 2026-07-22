@@ -64,7 +64,7 @@ def test_build_run_context_full():
     import os
     ctx = build_run_context(
         app="dda",
-        metra_version="0.7.260514.10",
+        software_version="0.7.260514.10",
         input_files=["/x/y/a.mzML", "/x/y/b.mzML"],
         library_path="/libs/pos.msp",
         project_file=None,
@@ -84,7 +84,7 @@ def test_build_run_context_full():
 def test_build_run_context_accepts_explicit_timestamp():
     ctx = build_run_context(
         app="asfam",
-        metra_version="0.0.0",
+        software_version="0.0.0",
         input_files=[],
         run_timestamp="2026-05-14T10:00:00",
     )

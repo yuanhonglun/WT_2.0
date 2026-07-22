@@ -64,7 +64,7 @@ class FeedbackEntry:
 @dataclass
 class RunContext:
     app: str
-    metra_version: str
+    software_version: str
     run_timestamp: str
     input_files: list[str]
     input_root: str
@@ -76,7 +76,7 @@ class RunContext:
     def to_dict(self) -> dict:
         return {
             "app": self.app,
-            "metra_version": self.metra_version,
+            "software_version": self.software_version,
             "run_timestamp": self.run_timestamp,
             "input_files": list(self.input_files),
             "input_root": self.input_root,
@@ -90,7 +90,7 @@ class RunContext:
     def from_dict(cls, d: dict) -> "RunContext":
         return cls(
             app=str(d["app"]),
-            metra_version=str(d["metra_version"]),
+            software_version=str(d["software_version"]),
             run_timestamp=str(d["run_timestamp"]),
             input_files=list(d.get("input_files", [])),
             input_root=str(d.get("input_root", "")),
@@ -105,7 +105,7 @@ class RunContext:
 class FeedbackStore:
     schema_version: int
     app: str
-    metra_version: str
+    software_version: str
     run_context: RunContext
     entries: list[FeedbackEntry] = field(default_factory=list)
 
@@ -113,7 +113,7 @@ class FeedbackStore:
         return {
             "schema_version": self.schema_version,
             "app": self.app,
-            "metra_version": self.metra_version,
+            "software_version": self.software_version,
             "run_context": self.run_context.to_dict(),
             "entries": [e.to_dict() for e in self.entries],
         }
@@ -121,18 +121,18 @@ class FeedbackStore:
     @classmethod
     def from_dict(cls, d: dict) -> "FeedbackStore":
         outer_app = str(d["app"])
-        outer_version = str(d["metra_version"])
+        outer_version = str(d["software_version"])
         ctx = RunContext.from_dict(d["run_context"])
-        if ctx.app != outer_app or ctx.metra_version != outer_version:
+        if ctx.app != outer_app or ctx.software_version != outer_version:
             logger.warning(
                 "FeedbackStore field mismatch: outer (app=%s, version=%s) vs "
                 "run_context (app=%s, version=%s); outer wins",
-                outer_app, outer_version, ctx.app, ctx.metra_version,
+                outer_app, outer_version, ctx.app, ctx.software_version,
             )
         return cls(
             schema_version=int(d.get("schema_version", SCHEMA_VERSION)),
             app=outer_app,
-            metra_version=outer_version,
+            software_version=outer_version,
             run_context=ctx,
             entries=[FeedbackEntry.from_dict(e) for e in d.get("entries", [])],
         )

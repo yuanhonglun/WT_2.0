@@ -18,9 +18,9 @@ def _empty_store(app: str = "asfam") -> FeedbackStore:
     return FeedbackStore(
         schema_version=1,
         app=app,
-        metra_version="0.0.0",
+        software_version="0.0.0",
         run_context=RunContext(
-            app=app, metra_version="0.0.0",
+            app=app, software_version="0.0.0",
             run_timestamp="t", input_files=[], input_root="",
             library_path=None, project_file=None, export_dir=None, params={},
         ),

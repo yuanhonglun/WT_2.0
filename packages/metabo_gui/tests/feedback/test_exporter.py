@@ -15,11 +15,11 @@ from metabo_gui.feedback.models import (
 
 def _store_with(entries: list[FeedbackEntry]) -> FeedbackStore:
     ctx = RunContext(
-        app="dda", metra_version="0.0.0", run_timestamp="t",
+        app="dda", software_version="0.0.0", run_timestamp="t",
         input_files=["/x/y/a.mzML"], input_root="/x/y",
         library_path=None, project_file=None, export_dir=None, params={},
     )
-    return FeedbackStore(schema_version=1, app="dda", metra_version="0.0.0",
+    return FeedbackStore(schema_version=1, app="dda", software_version="0.0.0",
                         run_context=ctx, entries=entries)
 
 

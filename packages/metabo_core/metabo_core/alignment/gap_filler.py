@@ -151,7 +151,7 @@ def quant_ion(feature: CandidateFeature, config: GapFillConfig) -> Optional[Quan
 def _estimated_noise(peaks: list[CandidateFeature]) -> float:
     """``GetEstimatedNoise``: the loudest noise floor among the detected peaks.
 
-    METRA stores S/N rather than the noise itself, so invert it. A peak with no
+    ASFAM stores S/N rather than the noise itself, so invert it. A peak with no
     S/N contributes nothing instead of a zero that would win the ``max``.
     """
     noises = [

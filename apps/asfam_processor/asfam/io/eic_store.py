@@ -161,7 +161,7 @@ class EicSpillWriter:
 
     def __init__(self, keys: list[str], temp_dir: Optional[Path] = None):
         self._keys = list(keys)
-        self._dir = Path(tempfile.mkdtemp(prefix="metra_eic_", dir=temp_dir))
+        self._dir = Path(tempfile.mkdtemp(prefix="asfam_eic_", dir=temp_dir))
         self._parts: list[Path] = []
 
     def __enter__(self) -> "EicSpillWriter":

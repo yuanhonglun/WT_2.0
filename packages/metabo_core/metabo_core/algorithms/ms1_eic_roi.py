@@ -1,7 +1,7 @@
 """基于 slice + 50% overlap + 后期合并的共享 MS1 EIC (ROI) 构建器。
 
 算法参考 MS-DIAL ``PeakSpottingCore.cs`` 的 mass-slice + redundancy
-removal 思路, 在 METRA 平台中作为 LC-MS / GC-MS 共用的 EIC 提取层。
+removal 思路, 在本项目中作为 LC-MS / GC-MS 共用的 EIC 提取层。
 
 核心流程
 --------

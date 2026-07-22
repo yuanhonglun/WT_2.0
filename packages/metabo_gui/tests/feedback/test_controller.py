@@ -16,10 +16,10 @@ def project_path(tmp_path):
 @pytest.fixture
 def empty_store():
     from metabo_gui.feedback.models import FeedbackStore, RunContext
-    ctx = RunContext(app="dda", metra_version="0.0.0", run_timestamp="t",
+    ctx = RunContext(app="dda", software_version="0.0.0", run_timestamp="t",
                      input_files=[], input_root="", library_path=None,
                      project_file=None, export_dir=None, params={})
-    return FeedbackStore(schema_version=1, app="dda", metra_version="0.0.0",
+    return FeedbackStore(schema_version=1, app="dda", software_version="0.0.0",
                          run_context=ctx, entries=[])
 
 

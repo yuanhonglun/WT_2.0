@@ -56,7 +56,7 @@ def lwma_smooth(intensity: np.ndarray, window: int) -> np.ndarray:
     ``w=1`` MS-DIAL gives ``out[0] = (3*x[0]+x[1])/4`` while this returns
     ``(2*x[0]+x[1])/3``). The two agree only on the interior ``[w : n-w]``.
 
-    This boundary behaviour is intentional and is relied upon by the metra
+    This boundary behaviour is intentional and is relied upon by the builtin
     detector; the faithful MS-DIAL variant (used by the MS-DIAL engine port)
     lives in ``metabo_core.algorithms.msdial_peak_spotting._lwma_msdial``.
 

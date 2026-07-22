@@ -38,7 +38,7 @@ def test_feedback_entry_roundtrip():
 def test_run_context_minimal_fields():
     ctx = RunContext(
         app="dda",
-        metra_version="0.7.260514.6",
+        software_version="0.7.260514.6",
         run_timestamp="2026-05-14T10:00:00",
         input_files=["/a/b/x.mzML", "/a/b/y.mzML"],
         input_root="/a/b",
@@ -55,7 +55,7 @@ def test_run_context_minimal_fields():
 def test_store_roundtrip_empty_entries():
     ctx = RunContext(
         app="asfam",
-        metra_version="0.7.260514.6",
+        software_version="0.7.260514.6",
         run_timestamp="2026-05-14T10:00:00",
         input_files=[],
         input_root="",
@@ -67,7 +67,7 @@ def test_store_roundtrip_empty_entries():
     store = FeedbackStore(
         schema_version=1,
         app="asfam",
-        metra_version="0.7.260514.6",
+        software_version="0.7.260514.6",
         run_context=ctx,
         entries=[],
     )
@@ -77,14 +77,14 @@ def test_store_roundtrip_empty_entries():
 
 
 def test_store_authoritative_outer_fields_on_mismatch(caplog):
-    """If outer app/metra_version disagree with run_context, outer wins, log warning."""
+    """If outer app/software_version disagree with run_context, outer wins, log warning."""
     raw = {
         "schema_version": 1,
         "app": "asfam",
-        "metra_version": "0.7.260514.6",
+        "software_version": "0.7.260514.6",
         "run_context": {
             "app": "dda",
-            "metra_version": "0.0.0",
+            "software_version": "0.0.0",
             "run_timestamp": "2026-05-14T10:00:00",
             "input_files": [],
             "input_root": "",

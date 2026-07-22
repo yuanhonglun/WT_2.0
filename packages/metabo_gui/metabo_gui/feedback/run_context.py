@@ -52,7 +52,7 @@ def params_to_jsonable(params: dict) -> dict:
 def build_run_context(
     *,
     app: str,
-    metra_version: str,
+    software_version: str,
     input_files: list[str],
     library_path: str | None = None,
     project_file: str | None = None,
@@ -62,7 +62,7 @@ def build_run_context(
 ) -> RunContext:
     return RunContext(
         app=app,
-        metra_version=metra_version,
+        software_version=software_version,
         run_timestamp=run_timestamp or _dt.datetime.now().isoformat(timespec="seconds"),
         input_files=[str(p) for p in input_files],
         input_root=common_input_root(input_files),

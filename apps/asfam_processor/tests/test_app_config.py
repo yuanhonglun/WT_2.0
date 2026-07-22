@@ -100,8 +100,8 @@ def test_peak_detector_default_and_msdial_view():
     cfg = ProcessingConfig()
     assert cfg.peak_detector == "msdial"  # default flipped to msdial (0.7.260626.9)
     assert isinstance(cfg.msdial_peak, MsdialPeakSpottingConfig)
-    cfg2 = ProcessingConfig(peak_detector="metra")
-    assert cfg2.peak_detector == "metra"
+    cfg2 = ProcessingConfig(peak_detector="builtin")
+    assert cfg2.peak_detector == "builtin"
 
 
 def test_save_load_preserves_msdial_peak_type(tmp_path):

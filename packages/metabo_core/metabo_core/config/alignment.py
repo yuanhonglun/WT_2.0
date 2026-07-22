@@ -114,7 +114,7 @@ class JoinerConfig:
 
 @dataclass
 class GapFillConfig:
-    """Parameters of ``LcmsGapFiller``, plus the product-ion branch METRA adds.
+    """Parameters of ``LcmsGapFiller``, plus the product-ion branch ASFAM adds.
 
     See :mod:`metabo_core.alignment.gap_filler`. The two m/z tolerances are not
     free knobs — each must match the window the *detected* peaks of that kind

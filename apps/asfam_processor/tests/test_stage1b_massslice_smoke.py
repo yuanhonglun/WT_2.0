@@ -14,7 +14,7 @@ PR-C 把 stage1b 的 MS1 驱动内核从"每整数通道一条 1 Da EIC, 取 max
 MS1 驱动 feature, 直接数 ``detection_source == "ms1_driven"`` 即可。
 
 观测基线 (2026-06-24, 在该段实测):
-  - **n_ms1_driven = 864**  (旧 METRA 该段 *总* feature 数 ≈ 72,
+  - **n_ms1_driven = 864**  (旧版本 该段 *总* feature 数 ≈ 72,
     新内核约 12×, 显著更多)
   - ms1_sn:       median ≈ 71,  min ≈ 4.0 (恰好过 sn_fold=4 门)
   - ms1_gaussian: median ≈ 0.985, 全部 ≥ 0.85 (= ms1_peak 高斯门)
@@ -30,7 +30,7 @@ MS1 驱动 feature, 直接数 ``detection_source == "ms1_driven"`` 即可。
     ``sn_fold``), 不硬编码。
 
 慢测试: 加载 ~176 MB mzML + 找峰约 1 分钟, 标 ``@pytest.mark.slow``,
-默认 (无 ``METRA_RUN_SLOW=1`` 且无 ``-m slow``) 跳过; 数据缺失也跳过。
+默认 (无 ``ASFAM_RUN_SLOW=1`` 且无 ``-m slow``) 跳过; 数据缺失也跳过。
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ DATA = (
     / "test_data" / "asfam" / "full_range" / "RL_ASFAM_285-314_P_3.mzML"
 )
 
-# 旧 METRA 该段总 feature 数 (1 Da 塌缩 + ≥2 MS2 门), 仅作对照基线
+# 旧版本 该段总 feature 数 (1 Da 塌缩 + ≥2 MS2 门), 仅作对照基线
 OLD_BASELINE = 72
 # 数量门: 显著高于旧基线 (≈2.8×), 远低于实测 864 → 对 PR-E 调参稳健
 MIN_MS1_DRIVEN = 200
@@ -67,9 +67,9 @@ def _slow_explicitly_requested() -> bool:
 @pytest.mark.slow
 def test_stage1b_massslice_finds_more_real_peaks():
     """单段 smoke: MS1 驱动内核应找到显著更多 (>=200) 真实色谱峰。"""
-    if os.environ.get("METRA_RUN_SLOW") != "1" and not _slow_explicitly_requested():
+    if os.environ.get("ASFAM_RUN_SLOW") != "1" and not _slow_explicitly_requested():
         pytest.skip(
-            "slow test (~1 min, loads ~176MB mzML). Set METRA_RUN_SLOW=1 or run "
+            "slow test (~1 min, loads ~176MB mzML). Set ASFAM_RUN_SLOW=1 or run "
             "`pytest -m slow apps/asfam_processor/tests/test_stage1b_massslice_smoke.py`."
         )
     if not DATA.exists():
