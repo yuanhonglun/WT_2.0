@@ -180,7 +180,7 @@ index, the intermediate `_work/` directory, and a report under `_debug/`.
 
 Start the GUI with `python -m asfam.gui.app` (or run `ASFAMProcessor.exe` from a
 release build). The window title shows the running version, e.g.
-`ASFAM Processor v1.2.260721`. The interface is available in **English and
+`ASFAM Processor v1.2.260728`. The interface is available in **English and
 Chinese**; the choice is persisted between sessions.
 
 ### Toolbar
@@ -190,7 +190,7 @@ Chinese**; the choice is persisted between sessions.
 | **Run** | Start the pipeline with the current setup and configuration. |
 | **Stop** | Request cancellation; the run stops at the next stage boundary. |
 | **Re-annotate** | Re-run annotation → alignment → export only, reusing the intermediate results on disk. Use it to try a different library or scoring threshold without repeating detection. It overwrites the existing annotations. |
-| **Save Project** / **Open Project** | Save or restore a session as a `.asfam` project file (configuration, features, file paths, statistics, and a pointer to the intermediate directory). |
+| **Save Project** / **Open Project** | Save or restore a session as a `.asfam` project file (configuration, features, file paths, statistics, and pointers to the intermediate directory and the chromatogram store). A project is also auto-saved into the output directory after every GUI run, so it sits beside `alignment.eic`, `spotmap.json` and `_work/`; move or copy that directory as a whole and a reopened project still finds them. |
 | **Clear Intermediates** | Delete the `_work/` directory. This is the *only* thing that removes it — see [§12](#12-intermediate-results-checkpoints-and-resuming). |
 | **Export** | Write the current results out again (same files as Stage 8). |
 | **Notes Panel** | Show/hide the per-feature notes dock — see below. |
@@ -442,6 +442,7 @@ All outputs are written to the directory given by `-o/--output`.
 | `spotmap.json` | Index from a per-sample candidate to its spot's chromatograms in `alignment.eic`. Written in lockstep with it. |
 | `alignment_merge_map.json` | Source → keeper provenance for the spots reconciliation merged. |
 | `_debug/processing_report.txt` | Per-stage counts and timings for the run. |
+| `ASFAMProject_<timestamp>.asfam` | Auto-saved project (GUI runs only): reopen it to get the feature table, chromatograms and notes back without reprocessing. |
 | `_work/` | Per-sample intermediate results and checkpoints — see [§12](#12-intermediate-results-checkpoints-and-resuming). |
 
 ### `features.csv`

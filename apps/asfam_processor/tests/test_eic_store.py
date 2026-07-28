@@ -21,6 +21,7 @@ from asfam.io.eic_store import (
     Trace,
     load_spot_map,
     open_store,
+    resolve_store,
     save_spot_map,
 )
 
@@ -130,6 +131,93 @@ def test_open_store_is_quiet_about_a_missing_or_broken_file(tmp_path):
     assert open_store(tmp_path) is None
     (tmp_path / "alignment.eic").write_bytes(b"not an eic file")
     assert open_store(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Finding the store a project belongs to
+# ---------------------------------------------------------------------------
+
+def _write_store(directory, n_spots: int) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    keys = [f"F{i:05d}" for i in range(n_spots)]
+    with EicSpillWriter(keys, temp_dir=directory) as writer:
+        writer.add_sample(_sample(keys, "s1", 1.0))
+        writer.transpose(directory / "alignment.eic")
+
+
+def test_the_recorded_directory_is_used_when_it_is_still_there(tmp_path):
+    out = tmp_path / "result"
+    _write_store(out, 2)
+    store, found = resolve_store(recorded_dirs=[out])
+    assert found == out and len(store) == 2
+
+
+def test_a_store_beside_the_project_is_found(tmp_path):
+    """What a user who copied one file by hand would expect, and what a saved
+    project's own directory looks like. The reader used to derive exactly one
+    path — ``work_dir``'s parent — so a store sitting right next to the project
+    was never even looked at."""
+    proj = tmp_path / "ASFAMProject_20260727_090000.asfam"
+    proj.write_bytes(b"")
+    _write_store(tmp_path, 2)
+
+    store, found = resolve_store(project_path=proj,
+                                 recorded_dirs=[r"D:\gone\result"])
+    assert found == tmp_path and len(store) == 2
+
+
+def test_a_result_folder_that_moved_with_the_project_is_followed(tmp_path):
+    """The reported failure: the run was archived to another disk, so the
+    recorded ``D:\\...`` directory is gone and every reopened project came back
+    with no chromatograms at all."""
+    out = tmp_path / "result_0722"
+    _write_store(out, 3)
+    proj = tmp_path / "ASFAMProject_20260722_192205.asfam"
+    proj.write_bytes(b"")
+
+    store, found = resolve_store(
+        project_path=proj,
+        recorded_dirs=[r"D:\YHL\rice\result_0722"],
+    )
+    assert found == out and len(store) == 3
+
+
+def test_the_feature_count_settles_which_run_the_store_belongs_to(tmp_path):
+    """Two runs over the same data mint the same ``F00042`` ids, so a stale
+    store answers every lookup — with another run's chromatograms. Only the spot
+    count tells them apart, and it outranks the search order: here the stale one
+    is sitting right beside the project."""
+    _write_store(tmp_path, 5)                  # beside the project: another run
+    out = tmp_path / "result_0722"
+    _write_store(out, 3)                       # this project's own
+    proj = tmp_path / "ASFAMProject_20260722_192205.asfam"
+    proj.write_bytes(b"")
+
+    store, found = resolve_store(
+        project_path=proj,
+        recorded_dirs=[str(out)],
+        expected_spots=3,
+    )
+    assert found == out and len(store) == 3
+
+
+def test_a_count_mismatch_still_beats_showing_nothing(tmp_path):
+    """No candidate matches: plot something and say so in the log, rather than
+    leave the panel empty. Old projects predate the recorded directory and can
+    legitimately land here."""
+    _write_store(tmp_path, 5)
+    proj = tmp_path / "p.asfam"
+    proj.write_bytes(b"")
+
+    store, found = resolve_store(project_path=proj, expected_spots=3)
+    assert found == tmp_path and len(store) == 5
+
+
+def test_no_store_anywhere_is_reported_as_absent(tmp_path):
+    proj = tmp_path / "p.asfam"
+    proj.write_bytes(b"")
+    assert resolve_store(project_path=proj,
+                         recorded_dirs=[r"D:\gone", None]) == (None, None)
 
 
 # ---------------------------------------------------------------------------

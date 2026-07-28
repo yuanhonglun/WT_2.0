@@ -33,6 +33,25 @@ def test_default_timestamp_uses_now(tmp_path: Path):
     assert re.match(r"XProject_\d{8}_\d{6}\.xx$", p.name)
 
 
+def test_directory_overrides_the_data_dir(tmp_path: Path):
+    """ASFAM saves into the output directory so the project sits with the
+    companion files it reads (alignment.eic, spotmap.json, _work/) and the whole
+    folder can be archived as one unit."""
+    out = tmp_path / "result_0722"
+    out.mkdir()
+    p = auto_save_path(tmp_path / "raw" / "sample.mzML", app_prefix="ASFAM",
+                       extension="asfam", directory=out,
+                       timestamp=datetime(2026, 7, 27, 9, 0, 0))
+    assert p == out / "ASFAMProject_20260727_090000.asfam"
+
+
+def test_directory_none_still_means_beside_the_data(tmp_path: Path):
+    p = auto_save_path(tmp_path / "sample.mzML", app_prefix="ASFAM",
+                       extension="asfam", directory=None,
+                       timestamp=datetime(2026, 7, 27, 9, 0, 0))
+    assert p.parent == tmp_path
+
+
 def test_first_existing_picks_first(tmp_path: Path):
     a = tmp_path / "a.mzML"; a.write_text("")
     b = tmp_path / "b.mzML"

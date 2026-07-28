@@ -39,7 +39,7 @@ import struct
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 
 import numpy as np
 
@@ -299,6 +299,75 @@ def open_store(output_dir) -> Optional[EicStore]:
     except (OSError, EicStoreError, struct.error):
         logger.warning("Could not open %s", path, exc_info=True)
         return None
+
+
+def resolve_store(
+    *,
+    project_path=None,
+    recorded_dirs: Iterable = (),
+    expected_spots: Optional[int] = None,
+) -> tuple[Optional[EicStore], Optional[Path]]:
+    """Find the store belonging to a project; return it and the directory it is in.
+
+    The store is written to the run's output directory, and the project file
+    records where that was. Neither fact survives archiving the run to another
+    disk, so looking only where the project says is how a reopened project came
+    to have no chromatograms at all. Look, in order:
+
+    1. Beside the project file — where a saved project puts its own copy, and
+       where a user who moved one file by hand would naturally put it.
+    2. Each recorded directory, and :mod:`asfam.io.locate`'s re-anchorings of it
+       onto the project's directory, which is what catches a whole result folder
+       that moved.
+
+    ``expected_spots`` (the project's feature count) breaks ties: gap filling
+    writes exactly one spot per feature, so a store with a different count
+    belongs to a *different run*. Two runs over the same data mint the same
+    ``F00042``-style ids, so a stale store answers every lookup — with another
+    run's chromatograms, silently. A candidate that matches the count therefore
+    wins over one that merely opens, whatever the search order says.
+
+    Returns ``(None, None)`` when nothing readable turns up.
+    """
+    from asfam.io.locate import relocation_candidates
+
+    anchor = Path(project_path).parent if project_path else None
+
+    def _candidates() -> Iterator[Path]:
+        if anchor is not None:
+            yield anchor
+        for recorded in recorded_dirs:
+            if recorded:
+                yield from relocation_candidates(recorded, anchor)
+
+    seen: set[str] = set()
+    fallback: Optional[tuple[EicStore, Path]] = None
+    for directory in _candidates():
+        key = os.path.normcase(str(directory))
+        if key in seen:
+            continue
+        seen.add(key)
+        store = open_store(directory)
+        if store is None:
+            continue
+        if expected_spots and len(store) != expected_spots:
+            logger.info(
+                "%s holds %d spots but this project has %d features — it is "
+                "another run's store; looking further",
+                directory / STORE_NAME, len(store), expected_spots,
+            )
+            if fallback is None:
+                fallback = (store, directory)
+            continue
+        return store, directory
+
+    if fallback is not None:
+        logger.warning(
+            "No chromatogram store matches this project's feature count; "
+            "falling back to %s", fallback[1] / STORE_NAME,
+        )
+        return fallback
+    return None, None
 
 
 # ---------------------------------------------------------------------------

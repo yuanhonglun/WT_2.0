@@ -19,6 +19,7 @@ def auto_save_path(
     app_prefix: str,
     extension: str,
     timestamp: datetime | None = None,
+    directory: str | Path | None = None,
 ) -> Path:
     """Build an auto-save project path next to ``first_input``.
 
@@ -33,9 +34,14 @@ def auto_save_path(
         ``"gcmsproj"``).
     timestamp : datetime, optional
         Override the timestamp (used by tests). Defaults to ``now()``.
+    directory : str | Path, optional
+        Save here instead of beside ``first_input``. An app whose run leaves
+        companion files behind (ASFAM writes ``alignment.eic`` next to its
+        export) should point this at the output directory, so the project and
+        the files it needs move as one folder.
     """
     ts = (timestamp or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    data_dir = Path(first_input).parent
+    data_dir = Path(directory) if directory is not None else Path(first_input).parent
     return data_dir / f"{app_prefix}Project_{ts}.{extension.lstrip('.')}"
 
 

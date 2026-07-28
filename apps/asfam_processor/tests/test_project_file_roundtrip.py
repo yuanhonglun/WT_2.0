@@ -245,6 +245,33 @@ def test_a_project_can_carry_both_and_neither(tmp_path):
     assert "candidates_by_rep" not in loaded
 
 
+def test_the_project_records_where_its_chromatograms_went(tmp_path):
+    """``alignment.eic`` is not in the pickle — it is hundreds of MiB — so the
+    project has to say where it is. Without this the reader had only
+    ``work_dir``'s parent to go on, and a run archived to another disk took its
+    chromatograms with it."""
+    path = str(tmp_path / "p.asfam")
+    save_project(path, ProcessingConfig(), [_make_feature()],
+                 mzml_paths=["a.mzML"], work_dir=str(tmp_path / "_work"),
+                 eic_dir=str(tmp_path))
+
+    assert load_project(path)["eic_dir"] == str(tmp_path)
+
+
+def test_a_project_older_than_eic_dir_loads_with_none(tmp_path):
+    """Written before v1.2.260728; the store is then looked for beside the
+    project and under ``work_dir``'s parent, as it always was."""
+    path = str(tmp_path / "old.asfam")
+    save_project(path, ProcessingConfig(), [_make_feature()], mzml_paths=["a.mzML"])
+    with open(path, "rb") as fh:
+        raw = pickle.load(fh)
+    del raw["eic_dir"]
+    with open(path, "wb") as fh:
+        pickle.dump(raw, fh)
+
+    assert load_project(path)["eic_dir"] is None
+
+
 def test_old_project_without_matched_pct_defaults_to_zero():
     """Backward compat: a .asfam written before PR-2 has no ``matched_pct`` /
     ``total_score`` keys. They must reload as 0.0, not raise."""

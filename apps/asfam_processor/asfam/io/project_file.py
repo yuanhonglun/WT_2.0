@@ -28,6 +28,7 @@ def save_project(
     stage_stats: Optional[dict] = None,
     candidates_by_rep: Optional[dict] = None,
     work_dir: Optional[str] = None,
+    eic_dir: Optional[str] = None,
 ) -> None:
     """Save project to .asfam file (pickle-based).
 
@@ -35,6 +36,11 @@ def save_project(
     spill directory holding the per-sample candidates. ``candidates_by_rep``
     embeds them inline instead; the pipeline stopped doing that when the spill
     landed, but old project files still carry them.
+
+    ``eic_dir`` records where ``alignment.eic`` and ``spotmap.json`` were
+    written. It is a hint, not an address — see :func:`asfam.io.eic_store.
+    resolve_store`, which also looks beside the project file and re-anchors this
+    path when the run has been archived to another disk.
     """
     project = {
         "version": PROJECT_VERSION,
@@ -42,6 +48,7 @@ def save_project(
         "mzml_paths": mzml_paths,
         "library_path": library_path,
         "work_dir": work_dir,
+        "eic_dir": eic_dir,
         "stage_stats": stage_stats or {},
         "features": _features_to_dicts(features),
     }
@@ -69,6 +76,8 @@ def load_project(path: str) -> dict:
     - features: list[Feature]
     - mzml_paths: list[str]
     - library_path: Optional[str]
+    - work_dir: Optional[str]
+    - eic_dir: Optional[str]
     - stage_stats: dict
     - candidates_by_rep: Optional[dict] (if saved)
     """
@@ -91,6 +100,9 @@ def load_project(path: str) -> dict:
         "mzml_paths": project.get("mzml_paths", []),
         "library_path": project.get("library_path"),
         "work_dir": project.get("work_dir"),
+        # Absent from projects written before v1.2.260728; the store is then
+        # looked for beside the project and under ``work_dir``'s parent.
+        "eic_dir": project.get("eic_dir"),
         "stage_stats": project.get("stage_stats", {}),
     }
 

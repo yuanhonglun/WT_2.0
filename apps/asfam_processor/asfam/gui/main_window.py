@@ -20,7 +20,7 @@ from metabo_gui.resources import app_icon_path
 from metabo_gui.theme import STYLESHEET
 
 from asfam.config import ProcessingConfig
-from asfam.io.eic_store import SpotMap, load_spot_map, open_store
+from asfam.io.eic_store import SpotMap, load_spot_map, resolve_store
 from asfam.models import Feature
 from asfam import __version__
 
@@ -79,6 +79,11 @@ class MainWindow(QMainWindow):
         # holds those so old projects keep working.
         self._candidates_by_rep: Optional[dict] = None
         self._work_dir: Optional[str] = None
+        # Where alignment.eic actually turned out to be, and the project file
+        # that pointed at it. Both feed the next save so a project reopened
+        # after the run was archived elsewhere still finds its chromatograms.
+        self._eic_dir: Optional[str] = None
+        self._project_path: Optional[str] = None
         # Candidate id -> aligned spot id, loaded beside alignment.eic. Empty
         # until a run or a project load fills it in.
         self._spotmap = SpotMap()
@@ -271,6 +276,11 @@ class MainWindow(QMainWindow):
         if reuse is None:
             return  # user cancelled
 
+        # This run supersedes whatever project is on screen; its store lives
+        # wherever this run writes it, not where the old project pointed.
+        self._project_path = None
+        self._eic_dir = None
+
         self.progress_panel.reset()
         self.act_run.setEnabled(False)
         self.act_stop.setEnabled(True)
@@ -347,6 +357,13 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.orchestrator:
             orch = self.worker.orchestrator
             self._stage_stats = orch.stage_stats
+            # A finished run supersedes whatever project was on screen: the
+            # store to read is the one this run just wrote. Re-annotation makes
+            # that a genuinely different directory from ``_work/``'s parent — it
+            # reuses the project's intermediates but writes alignment.eic to the
+            # newly chosen output directory.
+            self._project_path = None
+            self._eic_dir = getattr(self.worker, "output_dir", None)
             # ReAnnotateWorker's orchestrator never grouped the inputs, so keep
             # whatever the full run (or the project load) already established.
             if orch.work_dir:
@@ -405,11 +422,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Done: {len(features)} features")
         self.progress_panel.log(f"Pipeline complete: {len(features)} features")
 
-        # Auto-save project in data directory
+        # Auto-save the project beside the run's own output
         self._auto_save_project()
 
+    def _output_dir(self) -> Optional[str]:
+        """The directory this run wrote to, or ``None`` if nothing says.
+
+        ``_eic_dir`` first: it is the directory the run's own store went to.
+        Re-annotation is why that outranks ``_work_dir``'s parent — it reuses an
+        existing ``_work/`` while writing everything else to a freshly chosen
+        output directory, so the two are not the same place.
+        """
+        return (self._eic_dir
+                or (str(Path(self._work_dir).parent) if self._work_dir else None)
+                or self.setup_panel.get_output_dir()
+                or None)
+
     def _auto_save_project(self):
-        """Auto-save project file next to raw data."""
+        """Auto-save the project into the output directory.
+
+        It used to land next to the raw data, which put it on the far side of
+        the run from ``alignment.eic``, ``spotmap.json`` and ``_work/``. Moving
+        the results then left the project pointing at absolute paths on a disk
+        it would never see again, and the reopened project had no chromatograms
+        — the whole point of the store. Written into the output directory, the
+        project and everything it reads are one folder that can be copied
+        anywhere as a unit.
+        """
         if not self.features or not self._mzml_paths:
             return
         try:
@@ -421,6 +460,7 @@ class MainWindow(QMainWindow):
                 self._mzml_paths[0],
                 app_prefix="ASFAM",
                 extension="asfam",
+                directory=self._output_dir(),
             )
 
             save_project(
@@ -430,8 +470,10 @@ class MainWindow(QMainWindow):
                 stage_stats=self._stage_stats,
                 candidates_by_rep=self._candidates_by_rep,
                 work_dir=self._work_dir,
+                eic_dir=self._eic_dir,
             )
-            self.progress_panel.log(f"Project auto-saved: {proj_path.name}")
+            self._project_path = str(proj_path)
+            self.progress_panel.log(f"Project auto-saved: {proj_path}")
             self._saving_project = False
             # Install feedback system bound to the auto-save path
             if self._feedback_controller is None:
@@ -527,22 +569,38 @@ class MainWindow(QMainWindow):
             return []
 
     def _load_eic_store(self) -> None:
-        """Point the EIC viewer at ``alignment.eic`` and its key map, both of
-        which sit beside ``_work/``.
+        """Point the EIC viewer at ``alignment.eic`` and its key map.
 
-        Absent when gap fill was disabled or could not find the raw data; the
-        viewer says so rather than reaching for an mzML.
+        The store sits beside ``_work/`` when the run is opened on the machine
+        that produced it. It does not when the run has been archived elsewhere,
+        which is why this asks :func:`resolve_store` rather than deriving one
+        path: it also looks beside the project file, and re-anchors the recorded
+        directories on it. Both files are read from whichever directory won, so
+        the key map can never come from a different run than the store.
+
+        Genuinely absent when gap fill was disabled or could not find the raw
+        data; the viewer says so rather than reaching for an mzML.
         """
-        output_dir = Path(self._work_dir).parent if self._work_dir else None
-        store = open_store(output_dir) if output_dir else None
+        recorded = [self._eic_dir]
+        if self._work_dir:
+            recorded.append(str(Path(self._work_dir).parent))
+        store, store_dir = resolve_store(
+            project_path=self._project_path,
+            recorded_dirs=recorded,
+            expected_spots=len(self.features) or None,
+        )
         self.eic_plot.set_eic_store(store)
-        self._spotmap = load_spot_map(output_dir) if output_dir else SpotMap()
+        if store_dir is not None:
+            # Only on a hit: a miss leaves the recorded hint in place for the
+            # next save rather than replacing it with nothing.
+            self._eic_dir = str(store_dir)
+        self._spotmap = load_spot_map(store_dir) if store_dir else SpotMap()
         if store is None:
             self.progress_panel.log(
                 "No alignment.eic found — EIC panel unavailable")
         else:
             self.progress_panel.log(
-                f"Chromatogram store: {len(store)} features")
+                f"Chromatogram store: {len(store)} features ({store_dir})")
 
     def _store_key_for(self, feat: Feature) -> Optional[str]:
         """Where ``feat``'s chromatograms live in ``alignment.eic``.
@@ -771,8 +829,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_save_project(self):
+        # Default to the output directory: that is where alignment.eic and
+        # _work/ are, and a project saved beside them travels with them.
+        default = os.path.join(self._output_dir() or "", "project.asfam")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", "project.asfam", "ASFAM Project (*.asfam)")
+            self, "Save Project", default, "ASFAM Project (*.asfam)")
         if not path:
             return
         from asfam.io.project_file import save_project
@@ -783,7 +844,9 @@ class MainWindow(QMainWindow):
             stage_stats=self._stage_stats,
             candidates_by_rep=self._candidates_by_rep,
             work_dir=self._work_dir,
+            eic_dir=self._eic_dir,
         )
+        self._project_path = path
         self.progress_panel.log(f"Project saved to {path}")
         QMessageBox.information(self, "Saved", f"Project saved to {path}")
 
@@ -800,6 +863,8 @@ class MainWindow(QMainWindow):
             self, "Open Project", "", "ASFAM Project (*.asfam)")
         if not path:
             return
+        from asfam.io import spill
+        from asfam.io.locate import relocate
         from asfam.io.project_file import load_project
         try:
             proj = load_project(path)
@@ -813,13 +878,26 @@ class MainWindow(QMainWindow):
         self._library_path = proj.get("library_path")
         self._stage_stats = proj.get("stage_stats", {})
         self._candidates_by_rep = proj.get("candidates_by_rep")  # pre-spill projects
+        self._project_path = path
+        self._eic_dir = proj.get("eic_dir")
         self._work_dir = proj.get("work_dir")
         if self._work_dir and not os.path.isdir(self._work_dir):
-            self.progress_panel.log(
-                f"Intermediate results directory is gone: {self._work_dir}")
-            self._work_dir = None
+            # Recorded absolute, so archiving the run to another disk breaks it.
+            # Re-anchor on the directory the project was opened from; a _work
+            # with no checkpoints in it is a look-alike, not the one we want.
+            moved = relocate(
+                self._work_dir, os.path.dirname(path),
+                is_match=lambda p: p.is_dir() and bool(spill.scan_checkpoints(p)),
+            )
+            if moved is not None:
+                self.progress_panel.log(
+                    f"Intermediate results moved to {moved}")
+                self._work_dir = str(moved)
+            else:
+                self.progress_panel.log(
+                    f"Intermediate results directory is gone: {self._work_dir}")
+                self._work_dir = None
 
-        from asfam.io import spill
         rep_ids = sorted(self._candidates_by_rep or {})
         if not rep_ids and self._work_dir:
             rep_ids = sorted(sid for sid, _ in spill.scan_checkpoints(self._work_dir))
@@ -857,14 +935,24 @@ class MainWindow(QMainWindow):
         if self._mzml_paths:
             proj_dir = os.path.dirname(path)
             resolved = []
+            found_dir: Optional[str] = None
             for mp in self._mzml_paths:
                 if os.path.exists(mp):
                     resolved.append(mp)
-                else:
-                    # Try relative to project dir
-                    alt = os.path.join(proj_dir, os.path.basename(mp))
-                    if os.path.exists(alt):
-                        resolved.append(alt)
+                    continue
+                # The project now lives in the output directory, so the raw
+                # files are typically one level up rather than beside it — and
+                # a whole archived tree can put them further off still. Probe
+                # the directory that already answered first: these lists run to
+                # hundreds of files.
+                name = os.path.basename(mp)
+                if found_dir and os.path.isfile(os.path.join(found_dir, name)):
+                    resolved.append(os.path.join(found_dir, name))
+                    continue
+                alt = relocate(mp, proj_dir, is_match=Path.is_file)
+                if alt is not None:
+                    resolved.append(str(alt))
+                    found_dir = str(alt.parent)
             if resolved:
                 from asfam.pipeline.stage0_load import group_files_by_sample
                 try:
