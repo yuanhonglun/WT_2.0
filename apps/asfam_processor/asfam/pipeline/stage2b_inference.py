@@ -1,4 +1,8 @@
-"""Stage 2.5: MS2-only m/z inference using library matching + neutral loss consensus."""
+"""Stage 2.5: precursor m/z for MS2-only features.
+
+Neutral-loss consensus first (optionally preceded by library matching), the
+stage-2 isolation-window centroid as the last fallback. See ``run_stage2b``.
+"""
 from __future__ import annotations
 
 import logging
@@ -27,18 +31,56 @@ NEUTRAL_LOSSES = [
 ]
 
 
+#: Counter names ``run_stage2b`` reports through ``stats`` (and the orchestrator
+#: prints in ``processing_report.txt``), in report order.
+STAGE2B_COUNTERS = (
+    "ms2_only_in",
+    "library_assigned",
+    "nl_assigned",
+    "window_fallback",
+    "no_precursor",
+    "retained_fragment_poor",
+    "discarded_fragment_poor",
+)
+
+
 def run_stage2b(
     features_by_replicate: dict[str, list[CandidateFeature]],
     config: ProcessingConfig,
     spectral_library_path: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
     preloaded_library: Optional[list] = None,
+    stats: Optional[dict] = None,
 ) -> dict[str, list[CandidateFeature]]:
-    """Infer precise m/z for ms2_only signals.
+    """Give the MS2-only features stage 2 left without a precursor one.
 
-    Step 1: Library matching (MS1-restricted, composite similarity)
-    Step 2: Neutral loss consensus method
-    Discard features with too few fragments.
+    Order of evidence (the design order; restored in v1.4.2610xx after the
+    2026-06-25 stage-2 fallback had been pre-empting this stage):
+
+    1. ``ms1_peak`` / ``ms1_relaxed`` — assigned in stage 2 from a detected MS1
+       peak; such features already carry ``mz_source`` and never enter here.
+    2. Library-matching inference (``enable_library_mz_inference``, off by
+       default): ``mz_source="library"``.
+    3. Neutral-loss consensus, for features with at least
+       ``min_fragments_for_inference`` fragments (:func:`_nl_consensus_predict`):
+       ``mz_source="nl_consensus"``, ``mz_confidence`` high / medium / low for
+       >= 3 / 2 / 1 supporting fragments, the count itself in ``nl_n_support``.
+    4. Isolation-window centroid stored by stage 2 (``ms1_window_mz``), for
+       whatever is still without a source — NL failed, or too few fragments:
+       ``ms1_precursor_mz`` takes the centroid, ``mz_source="ms1_lowres"``,
+       ``mz_confidence="low"``. Last, because it is an intensity-weighted
+       mixture centroid of the whole 1-Da window.
+    5. Nothing: ``precursor_mz`` stays the integer channel (``mz_source=""``).
+
+    Fragment-poor features (fewer than ``min_fragments_for_inference``
+    fragments) cannot take step 3. With ``retain_fragment_poor_ms2_only`` (the
+    default) they go straight to step 4 / 5, stay in every table and are
+    labelled tier D at export; with the flag off the pre-v1.4 behaviour returns
+    and they are dropped (``status="discarded_few_fragments"``, the one true
+    deletion in the pipeline).
+
+    ``stats``, when given, receives the :data:`STAGE2B_COUNTERS` summed over
+    the replicates passed in.
     """
     logger.info("Stage 2.5: MS2-only m/z inference...")
 
@@ -50,6 +92,10 @@ def run_stage2b(
         # Library-matching inference disabled by config — skip library step entirely.
         library = None
 
+    retain_poor = bool(getattr(config, "retain_fragment_poor_ms2_only", True))
+    min_frags = int(config.min_fragments_for_inference)
+    totals = {k: 0 for k in STAGE2B_COUNTERS}
+
     for rep_id, features in features_by_replicate.items():
         ms2_only = [f for f in features if f.signal_type == "ms2_only"
                      and not f.mz_source]
@@ -58,48 +104,86 @@ def run_stage2b(
 
         logger.info("  Replicate %s: %d ms2_only signals to process", rep_id, len(ms2_only))
 
-        n_library = 0
-        n_nl = 0
-        n_discarded = 0
+        counts = {k: 0 for k in STAGE2B_COUNTERS}
+        counts["ms2_only_in"] = len(ms2_only)
 
         for i, feat in enumerate(ms2_only):
             if progress_callback and i % 50 == 0:
                 progress_callback("stage2b", i, len(ms2_only), f"Rep {rep_id}: inferring m/z")
 
-            if feat.n_fragments < config.min_fragments_for_inference:
-                feat.status = "discarded_few_fragments"
-                n_discarded += 1
-                continue
+            if feat.n_fragments < min_frags:
+                if not retain_poor:
+                    feat.status = "discarded_few_fragments"
+                    counts["discarded_fragment_poor"] += 1
+                    continue
+                counts["retained_fragment_poor"] += 1
+            else:
+                # Step 2: Library matching (opt-in)
+                if library is not None:
+                    match = _library_match(feat, library, config)
+                    if match is not None:
+                        feat.inferred_mz = match["precursor_mz"]
+                        feat.matchms_score = match["score"]
+                        feat.matchms_name = match.get("name", "")
+                        feat.inferred_formula = match.get("formula", "")
+                        feat.mz_source = "library"
+                        counts["library_assigned"] += 1
+                        continue
 
-            # Step 1: Library matching
-            if library is not None:
-                match = _library_match(feat, library, config)
-                if match is not None:
-                    feat.inferred_mz = match["precursor_mz"]
-                    feat.matchms_score = match["score"]
-                    feat.matchms_name = match.get("name", "")
-                    feat.inferred_formula = match.get("formula", "")
-                    feat.mz_source = "library"
-                    n_library += 1
+                # Step 3: Neutral loss consensus
+                nl_result = _nl_consensus_predict(feat)
+                if nl_result is not None:
+                    feat.inferred_mz = nl_result["mz"]
+                    feat.mz_source = "nl_consensus"
+                    feat.mz_confidence = nl_result["confidence"]
+                    feat.nl_n_support = int(nl_result["n_support"])
+                    counts["nl_assigned"] += 1
                     continue
 
-            # Step 2: Neutral loss consensus
-            nl_result = _nl_consensus_predict(feat)
-            if nl_result is not None:
-                feat.inferred_mz = nl_result["mz"]
-                feat.mz_source = "nl_consensus"
-                feat.mz_confidence = nl_result["confidence"]
-                n_nl += 1
-                continue
+            # Step 4 / 5: window-centroid fallback, else the integer channel.
+            if _apply_window_fallback(feat):
+                counts["window_fallback"] += 1
+            else:
+                counts["no_precursor"] += 1
 
-            n_discarded += 1
+        if not retain_poor:
+            features_by_replicate[rep_id] = [
+                f for f in features if f.status != "discarded_few_fragments"
+            ]
 
-        features_by_replicate[rep_id] = [f for f in features if f.status != "discarded_few_fragments"]
+        logger.info(
+            "  Replicate %s: %d library, %d NL consensus, %d window-centroid "
+            "fallback, %d no precursor; fragment-poor %d retained / %d discarded",
+            rep_id, counts["library_assigned"], counts["nl_assigned"],
+            counts["window_fallback"], counts["no_precursor"],
+            counts["retained_fragment_poor"], counts["discarded_fragment_poor"],
+        )
+        for k in STAGE2B_COUNTERS:
+            totals[k] += counts[k]
 
-        logger.info("  Replicate %s: %d library, %d NL consensus, %d no inference",
-                     rep_id, n_library, n_nl, n_discarded)
-
+    if stats is not None:
+        stats.update(totals)
     return features_by_replicate
+
+
+def _apply_window_fallback(feature: CandidateFeature) -> bool:
+    """Make the stored isolation-window centroid the reported precursor.
+
+    Only for a feature that still has no precursor at all; the centroid goes
+    into ``ms1_precursor_mz`` (as the pre-v1.4 stage-2 fallback did, so the
+    GUI, alignment corroboration and export read it from the same place) with
+    ``mz_source="ms1_lowres"`` / ``mz_confidence="low"``. Returns False when
+    stage 2 stored no centroid (no MS1 signal in the window).
+    """
+    if feature.ms1_precursor_mz is not None or feature.mz_source:
+        return False
+    mz = getattr(feature, "ms1_window_mz", None)
+    if mz is None:
+        return False
+    feature.ms1_precursor_mz = float(mz)
+    feature.mz_source = "ms1_lowres"
+    feature.mz_confidence = "low"
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +291,14 @@ def _nl_consensus_predict(feature: CandidateFeature) -> Optional[dict]:
     Clusters candidates within 0.01 Da and selects the cluster supported
     by the most distinct fragment ions (intensity-weighted).
     """
+    # The window the instrument isolated is centred on the recorded isolation
+    # target (stamped on the feature by stage 1 / 2), not on the integer
+    # channel, which is only floor(target): above m/z ~800 the two differ by
+    # half a window, and a candidate in the upper half would be lost.
     channel = feature.precursor_mz_nominal
-    lo, hi = channel - 0.5, channel + 0.5
+    centre = getattr(feature, "isolation_target_mz", None)
+    centre = float(channel) if centre is None else float(centre)
+    lo, hi = centre - 0.5, centre + 0.5
 
     candidates = []
     for mz, intensity in zip(feature.ms2_mz, feature.ms2_intensity):

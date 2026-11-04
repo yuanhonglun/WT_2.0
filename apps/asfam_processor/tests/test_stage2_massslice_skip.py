@@ -165,15 +165,31 @@ def test_stage2_lowres_ms1_fallback_for_ms2_only():
     cfg = ProcessingConfig()
     run_stage2({"1": [raw]}, {"1": [feat]}, cfg)
 
-    # 兜底应赋低分辨精确 m/z, 不再退回整数通道
-    assert feat.ms1_precursor_mz is not None, "未给 ms2_only feature 补低分辨 MS1 m/z"
+    # v1.4.2610xx: stage 2 only *stores* the window centroid. The reported
+    # precursor is still unassigned here so that stage 2.5 can try neutral-loss
+    # consensus first and fall back to this value last.
+    assert feat.ms1_window_mz is not None, "window centroid was not stored"
+    assert abs(feat.ms1_window_mz - 200.3) < 0.05, (
+        f"window centroid should be ≈200.3 (the in-window ion), got {feat.ms1_window_mz}"
+    )
+    assert feat.ms1_precursor_mz is None
+    assert feat.mz_source == ""
+    assert feat.mz_confidence == ""
+    assert feat.precursor_mz == 200.0      # integer channel until stage 2.5
+    # Still ms2_only: a window centroid is not a detected MS1 peak.
+    assert feat.signal_type == "ms2_only"
+
+    # Stage 2.5 then turns the stored centroid into the reported precursor —
+    # here the one fragment at 120 cannot yield a neutral-loss consensus and
+    # the feature is fragment-poor, so the centroid is the fallback.
+    from asfam.pipeline.stage2b_inference import run_stage2b
+    stats: dict = {}
+    run_stage2b({"1": [feat]}, cfg, stats=stats)
     assert feat.mz_source == "ms1_lowres"
     assert feat.mz_confidence == "low"
-    assert abs(feat.precursor_mz - 200.3) < 0.05, (
-        f"低分辨兜底质心应 ≈200.3 (窗内信号位置), 实际 {feat.precursor_mz}"
-    )
-    # 仍是 ms2_only (兜底只补 m/z, 不是检测到的 MS1 峰)
+    assert abs(feat.precursor_mz - 200.3) < 0.05
     assert feat.signal_type == "ms2_only"
+    assert stats["window_fallback"] == 1 and stats["retained_fragment_poor"] == 1
 
 
 def test_stage2_skips_ms1_driven_precise_mz():

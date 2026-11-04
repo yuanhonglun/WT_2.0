@@ -190,8 +190,23 @@ def _features_to_dicts(features: list[Feature]) -> list[dict]:
             "alignment_segment": f.alignment_segment,
             "alignment_relation": f.alignment_relation,
             "alignment_related_feature_id": f.alignment_related_feature_id,
+            # Set by DDA's refine pass (MS-DIAL's PeakCountFilter, which deletes
+            # instead of marking). ASFAM does not write it yet, but the field is
+            # on the shared Feature, so archival has to carry it or the guard
+            # test below fails and a reload silently clears the mark.
+            "low_detection": f.low_detection,
+            "quant_channel": f.quant_channel,
+            "n_detected_evidence": f.n_detected_evidence,
+            "detection_rate_evidence": f.detection_rate_evidence,
+            "alternate_channel_height": dict(f.alternate_channel_height),
+            "alternate_channel_mz": dict(f.alternate_channel_mz),
+            "identity_tier": f.identity_tier,
             "mz_source": f.mz_source,
             "mz_confidence": f.mz_confidence,
+            "inferred_mz": f.inferred_mz,
+            "ms1_window_mz": f.ms1_window_mz,
+            "nl_n_support": f.nl_n_support,
+            "isolation_target_mz": f.isolation_target_mz,
             "detection_source": f.detection_source,
             "is_duplicate": f.is_duplicate,
             "duplicate_group_id": f.duplicate_group_id,
@@ -244,12 +259,27 @@ def _dicts_to_features(dicts: list[dict]) -> list[Feature]:
             representative_rt=d.get("representative_rt"),
             alignment_window=d.get("alignment_window"),
             alignment_segment=d.get("alignment_segment", ""),
+            quant_channel=d.get("quant_channel", ""),
+            n_detected_evidence=int(d.get("n_detected_evidence", 0) or 0),
+            detection_rate_evidence=float(
+                d.get("detection_rate_evidence", 0.0) or 0.0
+            ),
+            alternate_channel_height=dict(
+                d.get("alternate_channel_height") or {}
+            ),
+            alternate_channel_mz=dict(d.get("alternate_channel_mz") or {}),
+            identity_tier=int(d.get("identity_tier", 0) or 0),
             alignment_relation=d.get("alignment_relation", ""),
             alignment_related_feature_id=d.get(
                 "alignment_related_feature_id", "",
             ),
+            low_detection=d.get("low_detection", False),
             mz_source=d.get("mz_source", ""),
             mz_confidence=d.get("mz_confidence", ""),
+            inferred_mz=d.get("inferred_mz"),
+            ms1_window_mz=d.get("ms1_window_mz"),
+            nl_n_support=d.get("nl_n_support"),
+            isolation_target_mz=d.get("isolation_target_mz"),
             detection_source=d.get("detection_source", "ms2_driven"),
             is_duplicate=d.get("is_duplicate", False),
             duplicate_group_id=d.get("duplicate_group_id"),
@@ -329,6 +359,9 @@ def _candidates_to_dicts(candidates: list[CandidateFeature]) -> list[dict]:
             "detection_source": c.detection_source,
             "mz_source": c.mz_source,
             "mz_confidence": c.mz_confidence,
+            "ms1_window_mz": c.ms1_window_mz,
+            "nl_n_support": c.nl_n_support,
+            "isolation_target_mz": c.isolation_target_mz,
             "is_duplicate": c.is_duplicate,
             "duplicate_group_id": c.duplicate_group_id,
             "duplicate_type": c.duplicate_type,
@@ -384,6 +417,10 @@ def _dicts_to_candidates(dicts: list[dict]) -> list[CandidateFeature]:
             detection_source=d.get("detection_source", "ms2_driven"),
             mz_source=d.get("mz_source", ""),
             mz_confidence=d.get("mz_confidence", ""),
+            # Absent from checkpoints written before v1.4.2610xx: default None.
+            ms1_window_mz=d.get("ms1_window_mz"),
+            nl_n_support=d.get("nl_n_support"),
+            isolation_target_mz=d.get("isolation_target_mz"),
             is_duplicate=d.get("is_duplicate", False),
             duplicate_group_id=d.get("duplicate_group_id"),
             duplicate_type=d.get("duplicate_type", ""),

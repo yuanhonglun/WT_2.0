@@ -37,6 +37,13 @@ COLUMNS = [
     ("Score", "_score"),
     ("WDP", "_wdp"),
     ("RDP", "_rdp"),
+    # Route-agnostic alignment (SPEC 2026-08-02 §10.5). Without these the row's
+    # numbers cannot be read correctly: "Height" is a reading on one specific
+    # ion, and which ion that is now varies per row rather than per route.
+    ("Quant Channel", "quant_channel"),
+    ("Detected", "_detected"),
+    ("Tier", "identity_tier"),
+    ("Alt Channel", "_alt_channel"),
 ]
 
 HIGH_COLOR = QColor(255, 255, 255)       # white (unused, kept for reference)
@@ -85,6 +92,27 @@ class FeatureTableModel(QAbstractTableModel):
                     return f"{float(getattr(sel, attr, 0.0)):.3f}"
                 except (TypeError, ValueError):
                     return ""
+            if col_attr == "_detected":
+                # Both numbers, because the second is not a replacement for the
+                # first: statistics only ever count `detected` cells, while
+                # evidence also counts a sample whose peak was found on another
+                # channel and then failed to re-integrate on this row's.
+                evidence = getattr(feat, "n_detected_evidence", None)
+                detected = getattr(feat, "n_detected", None)
+                if detected is None:
+                    return ""
+                if evidence is None or evidence == detected:
+                    return str(detected)
+                return f"{detected} ({evidence})"
+            if col_attr == "_alt_channel":
+                heights = getattr(feat, "alternate_channel_height", None) or {}
+                return str(len(heights)) if heights else ""
+            if col_attr == "identity_tier":
+                # 0 is "never had to decide" (a row from one observation), not a
+                # tier. Showing it as one invites reading it as the safest tier
+                # when it is simply not on the scale.
+                tier = getattr(feat, "identity_tier", None)
+                return str(tier) if tier else ""
             val = getattr(feat, col_attr, None)
             if val is None:
                 return ""

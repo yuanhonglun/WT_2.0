@@ -55,3 +55,10 @@ class AnnotationConfig:
     min_wdp: float = 0.0
     use_rt: bool = False
     top_n: int = 5
+    # Precursor candidate window (Da): a reference spectrum is a candidate only
+    # when |reference precursor - query precursor| <= this. The precursor is not
+    # a scored term, so the window is the only place precursor mass acts.
+    # 0.5 is the historical hard-coded value and keeps DDA / GC-MS byte-identical;
+    # ASFAM passes a per-feature window chosen by precursor source instead
+    # (``match_feature_topn(..., precursor_window_da=...)``).
+    precursor_window_da: float = 0.5

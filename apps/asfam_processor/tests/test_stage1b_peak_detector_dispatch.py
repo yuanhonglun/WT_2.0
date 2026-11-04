@@ -144,7 +144,7 @@ def test_msdial_mode_finds_feature():
     """peak_detector='msdial' routes to find_lc_ms1_features_msdial; must find ≥1.
 
     MS-DIAL's fixed-0.1 Da SUM-slice + derivative-engine path; the centroid
-    (basePeakMz) may differ slightly from the builtin detector's, so the m/z tolerance is
+    (basePeakMz) may differ slightly from builtin's, so the m/z tolerance is
     kept generous (±0.2 Da).  The point is that the dispatch reaches the new
     detector without error AND it finds the clean Gaussian ion.
     """

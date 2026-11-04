@@ -14,7 +14,7 @@ PR-C 把 stage1b 的 MS1 驱动内核从"每整数通道一条 1 Da EIC, 取 max
 MS1 驱动 feature, 直接数 ``detection_source == "ms1_driven"`` 即可。
 
 观测基线 (2026-06-24, 在该段实测):
-  - **n_ms1_driven = 864**  (旧版本 该段 *总* feature 数 ≈ 72,
+  - **n_ms1_driven = 864**  (the previous ASFAMProcessor 该段 *总* feature 数 ≈ 72,
     新内核约 12×, 显著更多)
   - ms1_sn:       median ≈ 71,  min ≈ 4.0 (恰好过 sn_fold=4 门)
   - ms1_gaussian: median ≈ 0.985, 全部 ≥ 0.85 (= ms1_peak 高斯门)
@@ -51,7 +51,7 @@ DATA = (
     / "test_data" / "asfam" / "full_range" / "RL_ASFAM_285-314_P_3.mzML"
 )
 
-# 旧版本 该段总 feature 数 (1 Da 塌缩 + ≥2 MS2 门), 仅作对照基线
+# the previous ASFAMProcessor 该段总 feature 数 (1 Da 塌缩 + ≥2 MS2 门), 仅作对照基线
 OLD_BASELINE = 72
 # 数量门: 显著高于旧基线 (≈2.8×), 远低于实测 864 → 对 PR-E 调参稳健
 MIN_MS1_DRIVEN = 200

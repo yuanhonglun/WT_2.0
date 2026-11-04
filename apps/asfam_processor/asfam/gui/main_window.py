@@ -1018,9 +1018,8 @@ class MainWindow(QMainWindow):
             app_name="ASFAM Processor",
             version=__version__,
             description=(
-                "WT 2.0 data-processing engine — processes All-ion Stepwise "
-                "Fragmentation Acquisition Mode (ASFAM) LC-QTOF mass "
-                "spectrometry data."
+                "ASFAM Processor — processes All-ion Stepwise "
+                "Fragmentation Acquisition LC-QTOF mass spectrometry data."
             ),
         )
 

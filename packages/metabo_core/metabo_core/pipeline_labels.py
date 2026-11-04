@@ -53,11 +53,13 @@ ASFAM_STAGE_TITLES: dict[str, str] = {
 }
 
 # DDA 专属阶段文案。DDA 流水线（load → features → isotope_adduct →
-# ms2_assoc → annotate → align → export）大多数 stage 可以直接借用
-# COMMON_STAGE_TITLES；这里只补充 DDA 独有的两步。
+# ms2_assoc → annotate → align → gap_fill → refine → export）大多数 stage
+# 可以直接借用 COMMON_STAGE_TITLES；这里只补充 DDA 独有的几步。
 DDA_STAGE_TITLES: dict[str, str] = {
     "isotope_adduct": "Grouping isotope and adduct peaks",
     "ms2_assoc": "Associating MS2 spectra to features",
+    "gap_fill": "Filling missing sample quantitation",
+    "refine": "Refining alignment rows",
 }
 
 # GC-MS 专属阶段文案。GC-MS 流水线（load → features → filter_quality →
@@ -69,6 +71,10 @@ GCMS_STAGE_TITLES: dict[str, str] = {
     "deconvolve": "Deconvolving co-eluting components",
     "dedup_components": "Deduplicating reconstructed components",
     "compute_ri": "Computing retention indices",
+    # Spelled ``gapfill``, unlike DDA's ``gap_fill`` — the two apps name their
+    # own stages and neither key is shared.
+    "gapfill": "Filling missing sample quantitation",
+    "refine_alignment": "Refining alignment rows",
 }
 
 

@@ -66,6 +66,24 @@ def _peak(
     )
 
 
+#: ``alignment_engine`` values, and the fold reason each one writes when a
+#: sample's surplus observation loses the cell. The mechanisms differ -- the
+#: legacy engine folds during a second reconciliation pass, the clustered one at
+#: the moment a cluster is resolved to cells -- but the record is the same shape.
+ENGINES = {
+    "legacy": "same_route_redundant_cell",
+    "clustered": "same_compound_cluster_member",
+}
+
+
+def _config(engine: str = "clustered", **kw) -> ProcessingConfig:
+    config = ProcessingConfig()
+    config.alignment_engine = engine
+    for key, value in kw.items():
+        setattr(config, key, value)
+    return config
+
+
 def _gap_context(tmp_path) -> GapFillContext:
     return GapFillContext(
         sample_files={"1": ["one.mzML"], "2": ["two.mzML"]},
@@ -124,7 +142,10 @@ def test_same_route_reconciliation_happens_before_gap_fill(tmp_path, monkeypatch
     assert stats["conservation"]["n_collapsed_same_compound"] == 1
 
 
-def test_reconciliation_spotmap_records_every_source_peak(tmp_path, monkeypatch):
+@pytest.mark.parametrize("engine", sorted(ENGINES))
+def test_reconciliation_spotmap_records_every_source_peak(
+    tmp_path, monkeypatch, engine,
+):
     features = {
         "1": [
             _peak("1", "keeper", 300.000, 5.000, height=9000.0),
@@ -137,7 +158,7 @@ def test_reconciliation_spotmap_records_every_source_peak(tmp_path, monkeypatch)
         lambda spots, sample_ids, config, context, progress_callback=None: None,
     )
 
-    run_stage7(features, ProcessingConfig(), gap_fill=_gap_context(tmp_path))
+    run_stage7(features, _config(engine), gap_fill=_gap_context(tmp_path))
 
     spot_map = load_spot_map(tmp_path)
     spot_of = spot_map.spot_of
@@ -145,13 +166,12 @@ def test_reconciliation_spotmap_records_every_source_peak(tmp_path, monkeypatch)
         "rep1_keeper", "rep1_loser", "rep2_detected",
     }
     assert len(set(spot_of.values())) == 1
-    assert spot_map.fold_reason_of == {
-        "rep1_loser": "same_route_redundant_cell",
-    }
+    assert spot_map.fold_reason_of == {"rep1_loser": ENGINES[engine]}
     assert spot_map.fold_evidence_of["rep1_loser"]["n_matched_fragments"] == 3
 
 
-def test_merge_provenance_is_saved_without_raw_gap_fill_context(tmp_path):
+@pytest.mark.parametrize("engine", sorted(ENGINES))
+def test_merge_provenance_is_saved_without_raw_gap_fill_context(tmp_path, engine):
     features = {
         "1": [
             _peak("1", "keeper", 300.000, 5.000, height=9000.0),
@@ -161,11 +181,11 @@ def test_merge_provenance_is_saved_without_raw_gap_fill_context(tmp_path):
     }
 
     run_stage7(
-        features, ProcessingConfig(), mapping_output_dir=str(tmp_path),
+        features, _config(engine), mapping_output_dir=str(tmp_path),
     )
 
     raw = json.loads((tmp_path / MERGE_MAP_NAME).read_text(encoding="utf-8"))
-    assert raw["fold_reason_of"]["rep1_loser"] == "same_route_redundant_cell"
+    assert raw["fold_reason_of"]["rep1_loser"] == ENGINES[engine]
     assert raw["spot_of"]["rep1_loser"] == raw["spot_of"]["rep1_keeper"]
     assert not (tmp_path / "spotmap.json").exists()
 
@@ -522,8 +542,7 @@ def test_dual_route_ms1_alias_occupies_only_one_master_before_join():
     )
     dual_ms2.detection_source = "ms2_driven"
     dual_ms1.detection_source = "ms1_driven"
-    cfg = ProcessingConfig()
-    cfg.alignment_reference_sample = "1"
+    cfg = _config("legacy", alignment_reference_sample="1")
     stats = {}
 
     result = run_stage7(
@@ -603,6 +622,139 @@ def test_prejoin_ms1_alias_matching_is_one_to_one_when_one_path_is_ambiguous():
     assert kept_ids | folded_ids == {
         ms1.feature_id, closest.feature_id, other.feature_id,
     }
+
+
+def _duplicate_slice_pair(path: str) -> tuple[CandidateFeature, CandidateFeature]:
+    """Two candidates of one path that integrated the *same* MS1 peak.
+
+    Bit-identical apex, bounds and height out of one raw file: the fingerprint
+    ``_ms1_natural_peak_evidence`` calls ``same_source_exact``.
+    """
+    left = _peak("1", "slice_a", 300.000, 5.000, height=1000.0)
+    right = _peak("1", "slice_b", 300.004, 5.000, height=1000.0)
+    for peak in (left, right):
+        peak.detection_source = path
+        peak.source_file = "one.mzML"
+    return left, right
+
+
+@pytest.mark.parametrize("path", ["ms1_driven", "ms2_driven"])
+def test_prejoin_same_path_pass_is_off_unless_asked(path):
+    left, right = _duplicate_slice_pair(path)
+
+    filtered, folds, stats = collapse_ms1_natural_peak_aliases({"1": [left, right]})
+
+    assert filtered == {"1": [left, right]}
+    assert folds == {}
+    assert stats.n_ms1_aliases_folded == 0
+    assert stats.n_same_path_aliases_folded == 0
+
+
+def test_prejoin_same_path_pass_reaches_the_exact_fingerprint_branch():
+    # Regression: the branch existed but candidate generation only ever drew
+    # edges *between* the two detection paths, so ``dual_path`` was always true
+    # and ``same_source_exact`` could never be the deciding evidence.
+    left, right = _duplicate_slice_pair("ms1_driven")
+
+    filtered, folds, stats = collapse_ms1_natural_peak_aliases(
+        {"1": [left, right]}, same_path=True,
+    )
+
+    assert stats.n_ms1_aliases_folded == 1
+    assert stats.n_same_path_aliases_folded == 1
+    assert [peak.feature_id for peak in filtered["1"]] == [left.feature_id]
+    (fold,) = [fold for values in folds.values() for fold in values]
+    assert fold.peak.feature_id == right.feature_id
+    assert fold.target_peak_id == left.feature_id
+    assert fold.evidence_kind == "ms1_natural_peak"
+
+
+def test_prejoin_same_path_pass_needs_more_than_geometry():
+    # The four geometric gates alone cannot tell "two detectors saw one peak"
+    # from "one detector reported it twice" -- same-path pairs are admitted on
+    # the integration fingerprint only.  Nudging the apex breaks the fingerprint
+    # while staying well inside every geometric gate.
+    left, right = _duplicate_slice_pair("ms1_driven")
+    right.rt_apex += 1e-6
+
+    _filtered, folds, stats = collapse_ms1_natural_peak_aliases(
+        {"1": [left, right]}, same_path=True,
+    )
+
+    assert folds == {}
+    assert stats.n_ms1_aliases_folded == 0
+
+
+def test_prejoin_same_path_pass_never_undoes_a_dual_path_fold():
+    # The dual-path pass runs first and the same-path pass only sees what it
+    # left behind, so enabling the latter can add folds but never move one.
+    ms1, ms2 = _duplicate_slice_pair("ms1_driven")
+    ms2.detection_source = "ms2_driven"
+    third = _peak("1", "slice_c", 300.004, 5.000, height=1000.0)
+    third.detection_source = "ms1_driven"
+    third.source_file = "one.mzML"
+
+    def run(same_path):
+        for peak in (ms1, ms2, third):
+            peak.gap_fill_status = "detected"
+        filtered, folds, stats = collapse_ms1_natural_peak_aliases(
+            {"1": [ms1, ms2, third]}, same_path=same_path,
+        )
+        return (
+            [peak.feature_id for peak in filtered["1"]],
+            sorted(
+                (fold.peak.feature_id, fold.target_peak_id)
+                for values in folds.values() for fold in values
+            ),
+            stats,
+        )
+
+    kept_off, folds_off, stats_off = run(False)
+    kept_on, folds_on, stats_on = run(True)
+
+    assert stats_off.n_ms1_aliases_folded == 1
+    assert stats_on.n_ms1_aliases_folded == 2
+    assert stats_on.n_same_path_aliases_folded == 1
+    assert set(folds_off).issubset(set(folds_on))
+    assert set(kept_on).issubset(set(kept_off))
+
+
+def test_prejoin_same_path_fold_carries_the_aliases_own_folds_along():
+    # The same-path pass can demote a peak that already keeps a dual-path fold.
+    # That fold names the demoted peak, not the new keeper, so it has to travel
+    # to the new keeper's bucket -- otherwise it is attached to a spot the
+    # demoted peak no longer occupies and ``attach_prejoin_alias_folds`` raises.
+    keeper = _peak("1", "a_keeper", 300.000, 5.000, height=1000.0)
+    demoted = _peak("1", "c_demoted", 300.004, 5.000, height=1000.0)
+    for peak in (keeper, demoted):
+        peak.detection_source = "ms1_driven"
+        peak.source_file = "one.mzML"
+    partner_a = _peak("1", "b_partner", 300.002, 5.001, height=980.0)
+    partner_c = _peak("1", "d_partner", 300.006, 5.002, height=970.0)
+    for peak in (partner_a, partner_c):
+        peak.detection_source = "ms2_driven"
+        peak.source_file = "one.mzML"
+
+    filtered, folds, stats = collapse_ms1_natural_peak_aliases(
+        {"1": [keeper, demoted, partner_a, partner_c]}, same_path=True,
+    )
+
+    assert stats.n_ms1_aliases_folded == 3
+    assert stats.n_same_path_aliases_folded == 1
+    assert [peak.feature_id for peak in filtered["1"]] == [keeper.feature_id]
+    # Every fold ends up under the one surviving peak, so each is attachable to
+    # the spot that peak lands in.
+    assert list(folds) == [("1", id(keeper))]
+    folded = {fold.peak.feature_id: fold.target_peak_id for fold in folds[("1", id(keeper))]}
+    assert set(folded) == {
+        demoted.feature_id, partner_a.feature_id, partner_c.feature_id,
+    }
+    assert folded[demoted.feature_id] == keeper.feature_id
+    # The demoted peak kept one dual-path partner of its own. That fold's
+    # evidence was measured against the demoted peak, so it still names it --
+    # only the bucket moved. Which partner the assignment gave it is not fixed.
+    partners = [folded[partner_a.feature_id], folded[partner_c.feature_id]]
+    assert sorted(partners) == sorted([keeper.feature_id, demoted.feature_id])
 
 
 def test_prejoin_alias_rejects_wide_overlapping_peaks_with_distant_apices():
@@ -1096,6 +1248,7 @@ def test_gap_fill_blocker_changes_the_cell_and_records_auditable_details(monkeyp
         ),
         counts,
         blocks,
+        {},
     ))
 
     assert target_spot.peaks["2"].gap_fill_status == "no_signal"
@@ -1201,7 +1354,8 @@ def test_singleton_spot_reselects_a_visible_representative():
     assert out[0].duplicate_type == ""
 
 
-def test_visible_same_fold_replaces_a_hidden_joiner_cell():
+@pytest.mark.parametrize("engine", sorted(ENGINES))
+def test_visible_same_fold_replaces_a_hidden_cell(engine):
     reference = _peak("1", "reference", 300.000, 5.000, height=9000.0)
     reference.is_duplicate = True
     reference.duplicate_type = "spectral"
@@ -1209,8 +1363,7 @@ def test_visible_same_fold_replaces_a_hidden_joiner_cell():
     hidden.is_duplicate = True
     hidden.duplicate_type = "spectral"
     visible = _peak("2", "z_visible", 300.002, 5.002, height=100.0)
-    cfg = ProcessingConfig()
-    cfg.alignment_reference_sample = "1"
+    cfg = _config(engine, alignment_reference_sample="1")
     stats = {}
 
     out = run_stage7(
@@ -1220,7 +1373,10 @@ def test_visible_same_fold_replaces_a_hidden_joiner_cell():
     assert len(out) == 1
     assert not out[0].is_duplicate
     assert out[0].heights["2"] == visible.ms1_height
-    assert stats["join"]["n_collapsed_same_compound"] == 1
+    # One of sample 2's two observations reaches the cell and the other is
+    # recorded, whichever engine decided it -- ``n_collapsed_same_compound`` is a
+    # JoinStats field and the clustered engine reports ClusterStats instead.
+    assert stats["conservation"]["n_collapsed_same_compound"] == 1
     assert stats["spots"]["n_fold_identity_not_same"] == 0
     assert stats["spots"]["n_fold_evidence_mismatch"] == 0
 
@@ -1549,3 +1705,218 @@ def test_stage7_output_is_invariant_to_candidate_permutation():
         return canonical, stats["conservation"]
 
     assert run(("P", "Q")) == run(("Q", "P"))
+
+
+# ---------------------------------------------------------------------------
+# The redundancy pass must be able to reach what the joiner splits
+# ---------------------------------------------------------------------------
+
+def test_refiner_gate_overlaps_the_window_the_joiner_splits_on():
+    """The two gates have to intersect, or no split is ever repairable.
+
+    The joiner puts two peaks in different rows when they are more than
+    ``alignment_mz_tolerance`` apart **or** more than ``alignment_rt_tolerance``
+    apart. If the redundancy pass required both a tighter m/z *and* a tighter
+    RT, the two regions would be disjoint and it could not undo a single split
+    the joiner made — which is what it did: 671 merges out of 48,148 rice rows.
+    """
+    cfg = ProcessingConfig()
+    refiner = cfg.refiner_view()
+    joiner = cfg.joiner_view()
+    from asfam.pipeline.stage7_reconcile import _merge_rt_gate
+    from metabo_core.models import PRODUCT
+
+    assert _merge_rt_gate(PRODUCT, refiner) >= joiner.rt_tolerance, (
+        "an RT-drift split lands outside the redundancy RT gate"
+    )
+    assert PRODUCT in refiner.merge_identity_routes, (
+        "a moved quantitation ion lands outside the redundancy m/z gate"
+    )
+
+
+def test_product_rows_split_by_a_moved_quant_ion_are_merged():
+    """One compound, two rows, because the tallest fragment differed per sample.
+
+    The rows are the same compound by MS2 and sit in one isolation window; only
+    ``ms2_rep_ion_mz`` disagrees, and it disagrees because it is an argmax over
+    a near-tie. The redundancy pass must reach across that.
+    """
+    features = {
+        "1": [_peak("1", "a", 85.03, 5.00, signal_type="ms2_only")],
+        "2": [_peak("2", "b", 150.07, 5.02, signal_type="ms2_only")],
+    }
+    rows = run_stage7(features, ProcessingConfig())
+    assert len(rows) == 1
+    assert sorted(rows[0].gap_fill_status) == ["1", "2"]
+
+
+def test_product_rows_with_different_ms2_stay_apart_when_the_ion_moves():
+    """Dropping the m/z gate does not drop the evidence."""
+    features = {
+        "1": [_peak("1", "a", 85.03, 5.00, signal_type="ms2_only")],
+        "2": [_peak("2", "b", 150.07, 5.02, signal_type="ms2_only",
+                    spectrum=_DIFFERENT)],
+    }
+    rows = run_stage7(features, ProcessingConfig())
+    assert len(rows) == 2
+
+
+def test_product_rows_in_different_windows_stay_apart_when_the_ion_moves():
+    """Common fragments are shared by many precursors; the window is the guard."""
+    features = {
+        "1": [_peak("1", "a", 85.03, 5.00, signal_type="ms2_only", window=300)],
+        "2": [_peak("2", "b", 150.07, 5.02, signal_type="ms2_only", window=700)],
+    }
+    rows = run_stage7(features, ProcessingConfig())
+    assert len(rows) == 2
+
+
+def test_every_row_is_quantified_on_one_ion():
+    """Rows joined across a moved quantitation ion get a consensus ion.
+
+    Without one, this row would hold sample 1's height off 85.03 beside sample
+    2's off 150.07 and its CV would mean nothing.
+    """
+    features = {
+        "1": [_peak("1", "a", 85.03, 5.00, signal_type="ms2_only", height=900.0)],
+        "2": [_peak("2", "b", 150.07, 5.02, signal_type="ms2_only", height=800.0)],
+    }
+    cfg = ProcessingConfig()
+    rows = run_stage7(features, cfg)
+    assert len(rows) == 1
+    assert rows[0].align_mz is not None
+
+    # And the gap-fill target the whole row is integrated on is that same ion.
+    spots = []
+    from asfam.pipeline.stage7_reconcile import reconcile_spots as _reconcile
+    from metabo_core.alignment.joiner import join_spots
+    joined, _ = join_spots(features, cfg.joiner_view())
+    spots, _stats = _reconcile(
+        joined, cfg.joiner_view(), cfg.refiner_view(),
+        is_annotated=lambda peak: False,
+        gap_config=cfg.gap_fill_view(),
+    )
+    target = gap_fill_target_for_spot(spots[0], cfg.gap_fill_view())
+    assert target is not None
+    assert target.quant.mz == pytest.approx(float(spots[0].alignment_mz))
+
+
+# ---------------------------------------------------------------------------
+# The clustered engine (SPEC 2026-08-02 §7-§8)
+# ---------------------------------------------------------------------------
+
+def test_clustered_engine_puts_a_precursor_view_and_a_fragment_view_in_one_row():
+    """G1, end to end. Under ``legacy`` these two can never share a row: the
+    joiner partitions by quantitation route before any evidence is consulted."""
+    ms1 = _peak("1", "ms1", 300.20, 5.00)
+    fragment = _peak("2", "frag", 100.00, 5.30, signal_type="ms2_only")
+    stats: dict = {}
+
+    clustered = run_stage7(
+        {"1": [ms1], "2": [fragment]}, _config("clustered"), stats_out=stats,
+    )
+    legacy = run_stage7({"1": [ms1], "2": [fragment]}, _config("legacy"))
+
+    assert len(clustered) == 1
+    assert stats["spots"]["n_cross_route_spots"] == 1
+    assert len(legacy) == 2
+
+
+def test_clustered_engine_keeps_an_isotope_satellite_out_of_its_parents_row():
+    """The per-sample isotope stage already ruled; alignment does not overturn it.
+
+    Tier 3 is where this bites. An envelope's members share nearly every
+    fragment, so the cosine and the anchor both say SAME, and the tier never
+    compares the two exact masses -- so nothing at all separates a monoisotopic
+    peak from its own satellite's fragment view. Merged, the satellite stops
+    being a row and the envelope is gone from the export, which is the one thing
+    the mark-never-delete rule forbids.
+    """
+    mono = _peak("1", "mono", 300.000, 5.000, height=1000.0)
+    satellite = _peak("2", "sat", 100.000, 5.100, height=800.0,
+                      signal_type="ms2_only")
+    satellite.isotope_index = 1
+
+    guarded = run_stage7({"1": [mono], "2": [satellite]}, _config("clustered"))
+    unguarded = run_stage7(
+        {"1": [mono], "2": [satellite]},
+        _config("clustered", cluster_respect_isotope_role=False),
+    )
+
+    assert len(guarded) == 2
+    assert len(unguarded) == 1, "without the guard they really do collapse"
+
+
+def test_clustered_engine_tolerates_a_cross_sample_isotope_role_disagreement():
+    """The other side of the same rule, and the reason it is not blanket.
+
+    Two samples' isotope stages run independently, so one can call a peak
+    monoisotopic where the other, having also found the peak below it, calls the
+    same peak M+1. That is a bookkeeping difference about one compound, not two
+    compounds -- and where both sides carry an exact precursor the 0.02 Da
+    tolerance already keeps real partners apart, 1.003 Da being fifty times it.
+    """
+    called_mono = _peak("1", "a", 300.000, 5.000, height=1000.0)
+    called_satellite = _peak("2", "b", 300.005, 5.010, height=900.0)
+    called_satellite.isotope_index = 1
+
+    out = run_stage7(
+        {"1": [called_mono], "2": [called_satellite]}, _config("clustered"),
+    )
+
+    assert len(out) == 1
+
+
+def test_clustered_engine_conserves_a_dual_path_alias_into_exactly_one_row():
+    """The clustered counterpart of the pre-join alias rule.
+
+    The engine no longer forbids a sample from putting two observations in one
+    row, so "two rows" is not the thing to assert any more. What must still hold
+    is that each natural peak is accounted for exactly once — as a cell or as a
+    fold — which is what the conservation audit checks.
+    """
+    early = _peak("1", "early", 300.000, 5.000, height=1000.0, spectrum=[])
+    late = _peak("1", "late", 300.000, 5.150, height=1000.0, spectrum=[])
+    dual_ms2 = _peak("2", "dual_ms2", 300.000, 5.020, height=1000.0, spectrum=[])
+    dual_ms1 = _peak("2", "dual_ms1", 300.001, 5.021, height=995.0, spectrum=[])
+    dual_ms2.detection_source = "ms2_driven"
+    dual_ms1.detection_source = "ms1_driven"
+    stats: dict = {}
+
+    result = run_stage7(
+        {"1": [early, late], "2": [dual_ms2, dual_ms1]},
+        _config("clustered", alignment_reference_sample="1"),
+        stats_out=stats,
+    )
+
+    assert stats["prejoin"]["n_ms1_aliases_folded"] == 1
+    conservation = stats["conservation"]
+    assert conservation["n_unexplained_lost"] == 0
+    assert (
+        conservation["n_input_keyed_peaks"]
+        == conservation["n_assigned_peaks"]
+        + conservation["n_collapsed_same_compound"]
+    )
+    assert sum(
+        feature.gap_fill_status.get("2") == "detected" for feature in result
+    ) == 1
+
+
+def test_clustered_engine_reports_one_window_and_segment_by_vote():
+    """``alignment_mz`` is voted across the detected cells; the window and the
+    segment beside it used to be whatever the tallest cell said. One loud sample
+    could therefore name a window the majority's quantitation ion did not
+    come from."""
+    quiet_a = _peak("1", "a", 300.20, 5.00, height=100.0)
+    quiet_b = _peak("2", "b", 300.20, 5.01, height=100.0)
+    loud = _peak("3", "c", 300.20, 5.02, height=9000.0, window=301)
+    # One acquisition segment holds many isolation windows; only the window
+    # differs here, or the segment gate would separate them first.
+    loud.segment_name = quiet_a.segment_name
+
+    out = run_stage7(
+        {"1": [quiet_a], "2": [quiet_b], "3": [loud]}, _config("clustered"),
+    )
+
+    assert len(out) == 1
+    assert out[0].alignment_window == 300

@@ -80,6 +80,26 @@ class CandidateFeature:
     mz_source: str = ""
     mz_confidence: str = ""
     inferred_mz: Optional[float] = None
+    #: Intensity-weighted MS1 centroid of the +/-0.5 Da isolation window at the
+    #: apex cycle. Stage 2 stores it on every MS2-only feature that got no
+    #: strict MS1 peak (raw data exists in stage 2 alone). Stage 2.5 reads it as
+    #: the LAST fallback (``mz_source="ms1_lowres"``) after neutral-loss
+    #: inference has had its turn, and export reports it beside the reported
+    #: precursor so the two estimates can be cross-checked (``window_delta_mda``).
+    #: It is a mixture centroid of the whole window, never a detected peak.
+    ms1_window_mz: Optional[float] = None
+    #: Centre m/z of the acquired 1-Da isolation window this feature's MS2 came
+    #: from (``RawSegmentData.precursor_targets[precursor_mz_nominal]``). The
+    #: integer ``precursor_mz_nominal`` is floor(target), so the range actually
+    #: isolated is ``isolation_target_mz ± 0.5`` and not ``nominal ± 0.5`` --
+    #: above m/z ~800 the two differ by half a window. Stamped at creation
+    #: (stage 1 / 1b) and by stage 2; stage 2.5 and alignment, which never see
+    #: raw data, read the window from here. ``None`` on features from older
+    #: checkpoints, which are then treated as integer-centred, as before.
+    isolation_target_mz: Optional[float] = None
+    #: Number of distinct fragment ions voting for the neutral-loss consensus
+    #: precursor (``mz_source="nl_consensus"``); ``None`` on every other path.
+    nl_n_support: Optional[int] = None
     inferred_formula: Optional[str] = None
     matchms_score: Optional[float] = None
     matchms_name: Optional[str] = None
@@ -169,10 +189,12 @@ class CandidateFeature:
         incidence on both ASFAM datasets: zero.
 
         The MS1 route falls back to ``ms1_precursor_mz`` when ``ms1_quant_mz`` is
-        unset, which is not a fudge: DDA never sets ``ms1_quant_mz`` because in
-        DDA the precursor *is* a picked MS1 ion — ``ms1_precursor_mz`` is its ROI
-        centroid and ``ms1_height`` is the height of that same ROI. The fiction
-        is specific to all-ion fragmentation.
+        unset, which is not a fudge: in DDA the precursor *is* a picked MS1 ion —
+        ``ms1_precursor_mz`` is its ROI centroid and ``ms1_height`` is the height
+        of that same ROI, so the two are the same number. (DDA sets
+        ``ms1_quant_mz`` to it anyway, because gap fill refuses to guess: see
+        ``gap_filler.quant_ion``.) The fiction is specific to all-ion
+        fragmentation.
         """
         if self.signal_type == "ms2_only":
             return self.ms2_rep_ion_mz
@@ -234,6 +256,16 @@ class Feature:
     align_mz: Optional[float] = None
     mz_source: str = ""
     mz_confidence: str = ""
+    #: Precursor provenance copied off the representative
+    #: :class:`CandidateFeature` (see its field docstrings): the neutral-loss
+    #: consensus value, the stored isolation-window centroid, and the number of
+    #: fragments supporting the consensus. All ``None`` on MS1-detected rows.
+    inferred_mz: Optional[float] = None
+    ms1_window_mz: Optional[float] = None
+    nl_n_support: Optional[int] = None
+    #: Centre of the representative's acquired isolation window (see
+    #: ``CandidateFeature.isolation_target_mz``); exported beside the precursor.
+    isolation_target_mz: Optional[float] = None
     detection_source: str = "ms2_driven"
     is_duplicate: bool = False
     duplicate_group_id: Optional[int] = None
@@ -262,6 +294,41 @@ class Feature:
     #: PRODUCT visible and never moves its intensities.
     alignment_relation: str = ""
     alignment_related_feature_id: str = ""
+    #: Too few samples detected this row to trust it — MS-DIAL's
+    #: ``PeakCountFilter`` / ``DetectedNumberFilter``, which *delete* the row.
+    #: ASFAMProcessor marks instead, and deliberately not via ``duplicate_type``: this row
+    #: is not a redundant copy of another one, it is a row with thin evidence.
+    #: A reader filtering on ``is_duplicate`` alone must still see it.
+    low_detection: bool = False
+    #: ``ms1`` / ``product``: which kind of chromatogram every number in this
+    #: row was read off. A row may be *grouped* from both kinds of observation,
+    #: but it is *quantified* on exactly one, and the two are not comparable —
+    #: an MS1 window sum at +/-0.01 Da against a product-ion slice at +/-0.1 Da.
+    quant_channel: str = ""
+    #: Samples with a natural detection **on this row's channel**
+    #: (:attr:`n_detected`) versus samples with a natural detection on *any*
+    #: channel. They differ when a sample saw the compound only through its
+    #: fragments and the row is quantified on MS1: the observation is real, but
+    #: nothing was integrable at the row's ion, so its cell reads ``no_signal``
+    #: while the evidence that the compound was there still stands.
+    #:
+    #: ``n_detected`` remains the only gate on ``mean_height`` / ``cv`` /
+    #: ``sn_ratio``. This is a second column, never a replacement.
+    n_detected_evidence: int = 0
+    detection_rate_evidence: float = 0.0
+    #: ``sample_id -> the reading that was set aside`` when re-integrating that
+    #: sample on the row's channel found nothing. Present only for those cells,
+    #: and never part of the quantitation matrix — the matrix has to stay one
+    #: scale. Here so the discarded number is inspectable rather than gone.
+    alternate_channel_height: dict = field(default_factory=dict)
+    alternate_channel_mz: dict = field(default_factory=dict)
+    #: **Loosest** identity tier that admitted a member to this row's cluster
+    #: (1 both sides had an exact precursor, 2 neither, 3 exactly one). ``0`` for
+    #: a row that never had to decide anything. Diagnostic, and a risk indicator
+    #: rather than a quality one: a row that needed tier 3 even once rests on the
+    #: tier with the weakest separating power, and reporting the strongest tier
+    #: instead would let a single exact-mass agreement hide that.
+    identity_tier: int = 0
 
     @property
     def quant_route(self) -> str:

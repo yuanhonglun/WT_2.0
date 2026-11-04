@@ -182,7 +182,14 @@ class PipelineOrchestrator:
 
         self._check_cancel()
         t0 = time.time()
-        feats = run_stage1(data, self.config, self._emit)
+        if self.config.enable_ms2_driven_branch:
+            feats = run_stage1(data, self.config, self._emit)
+        else:
+            # Ablation: MS1-driven branch only. Stage 1b sees no MS2-driven
+            # features to skip and therefore keeps every MS1 peak it finds.
+            logger.info("Stage 1 skipped (enable_ms2_driven_branch=False): "
+                        "MS1-driven detection only")
+            feats = {sample_id: []}
         n_ms2_driven = len(feats[sample_id])
         self._accumulate("Stage 1: MS2 Detection",
                          {"total_features": n_ms2_driven}, time.time() - t0)
@@ -214,11 +221,17 @@ class PipelineOrchestrator:
         # Pass the path only when the preload actually produced a list: without
         # this guard a failed preload would make stage 2.5 re-read the library
         # from disk once per sample.
+        stage2b_counts: dict = {}
         feats = run_stage2b(feats, self.config,
                             spectral_library_path if lean_library else None,
-                            self._emit, preloaded_library=lean_library)
+                            self._emit, preloaded_library=lean_library,
+                            stats=stage2b_counts)
+        # The precursor-source counters (nl_assigned / window_fallback /
+        # no_precursor / retained_fragment_poor / ...) go into
+        # processing_report.txt beside the feature count.
         self._accumulate("Stage 2.5: Inference",
-                         {"features_after": len(feats[sample_id])}, time.time() - t0)
+                         {"features_after": len(feats[sample_id]), **stage2b_counts},
+                         time.time() - t0)
 
         self._check_cancel()
         t0 = time.time()

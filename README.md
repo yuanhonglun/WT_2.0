@@ -113,9 +113,7 @@ will be added upon publication.)*
 
 ## License
 
-BSD 3-Clause with a Non-Commercial Clause. Free for academic and non-commercial
-use; commercial use requires written permission from the author. See
-[`LICENSE`](LICENSE).
+BSD 3-Clause License. See [`LICENSE`](LICENSE).
 
 ## Author
 

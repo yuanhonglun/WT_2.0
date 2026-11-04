@@ -10,10 +10,10 @@
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
+import os
 import pytest
 
 from metabo_core.io.mzml import (
@@ -26,15 +26,14 @@ from metabo_core.io.mzml import (
 from metabo_core.models import Scan
 
 
-# Local-data test: point ``ASFAM_TEST_MZML`` at a DDA mzML file to enable it.
-# Skipped by default, since no raw data ships with this repository.
-_REAL_DDA_ENV = os.environ.get("ASFAM_TEST_MZML", "")
-REAL_DDA = Path(_REAL_DDA_ENV) if _REAL_DDA_ENV else None
+REAL_DDA = Path(
+    os.environ.get("ASFAM_TEST_MZML", "") or "ASFAM_TEST_MZML-not-set.mzML"
+)
 
 
 pytestmark = pytest.mark.skipif(
-    REAL_DDA is None or not REAL_DDA.exists(),
-    reason="real DDA mzML not present (set ASFAM_TEST_MZML to enable)",
+    not REAL_DDA.exists(),
+    reason=f"real DDA mzML not present at {REAL_DDA}",
 )
 
 

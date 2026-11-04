@@ -11,14 +11,23 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from metabo_core.alignment.gap_filler import GapFillTarget, gap_fill_target
+from metabo_core.alignment.gap_filler import (
+    GapFillTarget,
+    choose_quant_channel,
+    consensus_quant_ion,
+    gap_fill_target,
+)
+from metabo_core.alignment.cluster import Cluster, observation_of
 from metabo_core.alignment.identity import (
     IdentityEvidence,
     IdentityState,
+    identity,
     ms2_identity_evidence,
 )
 from metabo_core.alignment.joiner import AlignmentSpot, FoldedPeak, Ms2Reader
-from metabo_core.config import GapFillConfig, JoinerConfig, RefinerConfig
+from metabo_core.config import (
+    GapFillConfig, IdentityConfig, JoinerConfig, RefinerConfig,
+)
 from metabo_core.models import MS1, PRODUCT, CandidateFeature
 
 
@@ -35,6 +44,9 @@ class ReconcileStats:
     n_identity_unjudgeable_rejected: int = 0
     n_candidate_clusters_examined: int = 0
     n_disjoint_ms1_spots_merged: int = 0
+    #: Spots whose joiner folds admit no single cell keeper that is SAME with
+    #: every alternative. The assignment is left as the joiner made it.
+    n_cell_plans_unresolved: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,9 @@ class PrejoinAliasStats:
     n_input_candidates: int = 0
     n_output_candidates: int = 0
     n_ms1_aliases_folded: int = 0
+    #: Subset of ``n_ms1_aliases_folded`` collapsed by the same-detection-path
+    #: pass, i.e. on ``same_source_exact`` evidence rather than ``dual_path``.
+    n_same_path_aliases_folded: int = 0
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,28 @@ class SpotAudit:
     membership_sha256: str
     assigned_detected_sha256: str
     natural_source_sha256: str
+    #: INV-3: every natural member of a row is within one isolation window of
+    #: the row's. Replaces ``n_product_multi_window_spots``, which only ever
+    #: looked at PRODUCT members because only PRODUCT rows could be split by a
+    #: window; a route-agnostic row has to hold the rule for all of them.
+    n_window_span_violations: int = 0
+    #: INV-4: the non-empty acquisition segments of a row's natural members all
+    #: agree. Replaces ``n_product_multi_segment_spots``, same reason.
+    n_segment_mismatch_spots: int = 0
+    #: Rows holding both an ``ms1_detected`` and an ``ms2_only`` natural member —
+    #: the thing the route split made impossible. **Not a violation**: it is the
+    #: measurement of G1, and ``n_mixed_quant_route_spots`` (which counts the
+    #: same rows) stops being enforceable the moment this is intended.
+    n_cross_route_spots: int = 0
+    #: Rows whose natural members carry two or more *different* high-confidence
+    #: annotation names. The mis-merge indicator, and the one number that says
+    #: whether looser grouping bought coverage or bought nonsense: splitting one
+    #: compound over two rows is redundancy, but merging two compounds into one
+    #: makes that row's CV and fold change meaningless. Requires
+    #: ``is_annotated``; ``0`` without it, which is not the same as "none".
+    n_conflicting_annotation_spots: int = 0
+    #: ``[(feature index, sorted names)]``, capped, for looking at.
+    conflicting_annotation_examples: tuple = ()
 
 
 class _Spectra:
@@ -146,8 +183,58 @@ def _source_signature(spot: AlignmentSpot) -> tuple:
     ))
 
 
-def recompute_alignment_center(spot: AlignmentSpot) -> None:
-    """Set the one RT/m/z/window/segment centre every later Stage 7 step uses."""
+def consensus_window_segment(
+    detected: list[CandidateFeature], vote: bool,
+) -> tuple[Optional[int], str]:
+    """The row's isolation window and acquisition segment.
+
+    ``vote=False`` is the historical rule: whatever the tallest detected cell
+    says. That is out of step with ``alignment_mz``, which the detected cells
+    *vote* on (``consensus_quant_ion``, after MS-DIAL's ``ResetQuantMasses``) —
+    one loud sample could therefore move the window while the ion it names came
+    from the majority. ``vote=True`` puts both on the same footing: the mode,
+    with total height breaking ties.
+    """
+    if not detected:
+        return None, ""
+    tallest = min(
+        detected,
+        key=lambda peak: (-(peak.ms1_height or 0.0), str(peak.feature_id)),
+    )
+    if not vote:
+        return int(tallest.precursor_mz_nominal), str(tallest.segment_name or "")
+
+    def _mode(key: Callable[[CandidateFeature], object]):
+        tally: dict[object, tuple[int, float]] = {}
+        for peak in detected:
+            count, height = tally.get(key(peak), (0, 0.0))
+            tally[key(peak)] = (count + 1, height + float(peak.ms1_height or 0.0))
+        return max(tally.items(), key=lambda item: (item[1][0], item[1][1]))[0]
+
+    return (
+        int(_mode(lambda peak: int(peak.precursor_mz_nominal))),
+        str(_mode(lambda peak: str(peak.segment_name or ""))),
+    )
+
+
+def recompute_alignment_center(
+    spot: AlignmentSpot,
+    gap_config: Optional[GapFillConfig] = None,
+    *,
+    vote_window: bool = False,
+) -> None:
+    """Set the one RT/m/z/window/segment centre every later Stage 7 step uses.
+
+    The m/z is the row's **consensus** quantitation ion, voted across the
+    detected cells rather than taken from the tallest one — see
+    :func:`~metabo_core.alignment.gap_filler.consensus_quant_ion`. Passing no
+    ``gap_config`` keeps the old tallest-cell behaviour, which is what callers
+    that only need the RT centre want.
+
+    ``vote_window`` extends the same vote to the window and segment; see
+    :func:`consensus_window_segment`. Off by default so the legacy engine keeps
+    its output byte-for-byte.
+    """
     detected = spot.detected_peaks
     if not detected:
         spot.alignment_rt = None
@@ -164,18 +251,44 @@ def recompute_alignment_center(spot: AlignmentSpot) -> None:
         ),
     )
     spot.alignment_rt = float(np.mean([peak.rt_apex for peak in detected]))
-    spot.alignment_mz = (
-        float(tallest.align_mz) if tallest.align_mz is not None else None
-    )
-    spot.alignment_window = int(tallest.precursor_mz_nominal)
-    spot.alignment_segment = str(tallest.segment_name or "")
+    consensus = None
+    if gap_config is not None:
+        representative = (
+            spot.peaks.get(spot.representative_sample_id)
+            if spot.representative_sample_id else None
+        )
+        # choose_quant_channel, not consensus_quant_ion: a row may now hold both
+        # an exact-precursor cell and a fragment-only one, and averaging a
+        # fragment m/z into a precursor m/z would give the row an ion that is
+        # neither. On a single-route row the two are the same function.
+        consensus = choose_quant_channel(detected, representative, gap_config)
+    if consensus is not None:
+        spot.alignment_mz = float(consensus.mz)
+    else:
+        spot.alignment_mz = (
+            float(tallest.align_mz) if tallest.align_mz is not None else None
+        )
+    window, segment = consensus_window_segment(detected, vote_window)
+    spot.alignment_window = window
+    spot.alignment_segment = segment
 
 
 def gap_fill_target_for_spot(
     spot: AlignmentSpot, config: GapFillConfig,
 ) -> Optional[GapFillTarget]:
-    """Build a target from, then pin it to, the stored consensus centre."""
-    target = gap_fill_target(spot.detected_peaks, config)
+    """Build a target from, then pin it to, the row's one quantitation channel.
+
+    ``gap_fill_target`` derives its channel from the *tallest* detected cell,
+    which is right only where every cell shares a route. A row that holds both
+    an exact-precursor cell and a fragment-only one would otherwise be filled on
+    whichever kind happened to be loudest, so the channel is re-decided here by
+    :func:`~metabo_core.alignment.gap_filler.choose_quant_channel` and the m/z,
+    the kind and the tolerance are all taken from it together. Taking only the
+    m/z — which is what pinning to ``alignment_mz`` alone did — would integrate a
+    precursor m/z over a product-ion slice.
+    """
+    detected = spot.detected_peaks
+    target = gap_fill_target(detected, config)
     if target is None:
         return None
     if spot.alignment_rt is None or spot.alignment_mz is None:
@@ -183,15 +296,19 @@ def gap_fill_target_for_spot(
     if spot.alignment_rt is None or spot.alignment_mz is None:
         return target
 
-    half = config.rt_expansion * max(target.peak_width, config.min_peak_width)
-    channel = (
-        int(spot.alignment_window)
-        if target.quant.kind == PRODUCT and spot.alignment_window is not None
-        else target.quant.channel
+    representative = (
+        spot.peaks.get(spot.representative_sample_id)
+        if spot.representative_sample_id else None
     )
+    quant = choose_quant_channel(detected, representative, config) or target.quant
+    quant = replace(quant, mz=float(spot.alignment_mz))
+    if quant.kind == PRODUCT and spot.alignment_window is not None:
+        quant = replace(quant, channel=int(spot.alignment_window))
+
+    half = config.rt_expansion * max(target.peak_width, config.min_peak_width)
     return replace(
         target,
-        quant=replace(target.quant, mz=float(spot.alignment_mz), channel=channel),
+        quant=quant,
         rt_center=float(spot.alignment_rt),
         rt_lo=float(spot.alignment_rt) - half,
         rt_hi=float(spot.alignment_rt) + half,
@@ -233,18 +350,45 @@ def _spot_identity(
     )
 
 
+def _merge_rt_gate(route: str, config: RefinerConfig) -> float:
+    """How far apart in RT two rows of one compound may sit and still merge.
+
+    ``rt_gate`` (0.05 min) is the historical value and stays the floor. It was
+    narrower than the window the joiner splits on (0.2 min), which made every
+    joiner-made split unreachable by this pass — see
+    :attr:`RefinerConfig.merge_rt_tolerance`.
+    """
+    if route in config.merge_identity_routes:
+        return max(float(config.merge_rt_tolerance), config.rt_gate)
+    return config.rt_gate
+
+
 def _geometry_matches(
     left: AlignmentSpot, right: AlignmentSpot, config: RefinerConfig,
 ) -> bool:
-    if left.alignment_mz is None or right.alignment_mz is None:
-        return False
+    """Are these two rows close enough to be one compound split in two?
+
+    The m/z half of the gate is dropped for the routes in
+    ``merge_identity_routes``, and only for them: those rows are quantified on a
+    per-sample ``argmax`` ion, so two rows of one compound routinely carry
+    different ``alignment_mz`` — the very split this pass exists to undo. They
+    still have to survive the reliable MS2 SAME decision in
+    :func:`_spots_are_mergeable`; dropping the m/z gate removes a coordinate that
+    was never evidence for them, it does not remove the evidence.
+    """
     if left.alignment_rt is None or right.alignment_rt is None:
         return False
+    route = left.quant_route
+    if abs(float(left.alignment_rt) - float(right.alignment_rt)) >= _merge_rt_gate(
+        route, config,
+    ):
+        return False
+    if route in config.merge_identity_routes:
+        return True
+    if left.alignment_mz is None or right.alignment_mz is None:
+        return False
     gate = config.mz_gate(float(right.alignment_mz))
-    return (
-        abs(float(left.alignment_mz) - float(right.alignment_mz)) < gate
-        and abs(float(left.alignment_rt) - float(right.alignment_rt)) < config.rt_gate
-    )
+    return abs(float(left.alignment_mz) - float(right.alignment_mz)) < gate
 
 
 def _window_compatible(left: AlignmentSpot, right: AlignmentSpot) -> bool:
@@ -277,6 +421,13 @@ class _ClusterIndex:
         self._rt_width = float(config.rt_gate)
         self._buckets: dict[tuple, list[int]] = {}
         self._partition_clusters: dict[tuple, list[int]] = {}
+        # Identity routes match with no m/z gate at all, so an m/z bucket cannot
+        # find their pairs. They get a second index cut on RT alone, inside the
+        # same route/window partition.
+        self._identity_rt_width = max(
+            float(config.merge_rt_tolerance), float(config.rt_gate),
+        )
+        self._identity_buckets: dict[tuple, list[int]] = {}
 
     @staticmethod
     def _partition(spot: AlignmentSpot) -> tuple:
@@ -285,14 +436,23 @@ class _ClusterIndex:
             spot.alignment_window if spot.quant_route == PRODUCT else None,
         )
 
+    def _uses_identity(self, spot: AlignmentSpot) -> bool:
+        return spot.quant_route in self._config.merge_identity_routes
+
     def add(self, cluster_idx: int, anchor: AlignmentSpot) -> None:
         partition = self._partition(anchor)
         self._partition_clusters.setdefault(partition, []).append(cluster_idx)
-        if (
-            anchor.alignment_mz is None
-            or anchor.alignment_rt is None
-            or self._rt_width <= 0
-        ):
+        if anchor.alignment_rt is None:
+            return
+        if self._uses_identity(anchor):
+            if self._identity_rt_width <= 0:
+                return
+            self._identity_buckets.setdefault(
+                (partition,
+                 int(float(anchor.alignment_rt) // self._identity_rt_width)), [],
+            ).append(cluster_idx)
+            return
+        if anchor.alignment_mz is None or self._rt_width <= 0:
             return
         mz_bucket = int(float(anchor.alignment_mz) // _MZ_BUCKET_WIDTH)
         rt_bucket = int(float(anchor.alignment_rt) // self._rt_width)
@@ -301,13 +461,19 @@ class _ClusterIndex:
         ).append(cluster_idx)
 
     def candidates(self, spot: AlignmentSpot) -> list[int]:
-        if (
-            spot.alignment_mz is None
-            or spot.alignment_rt is None
-            or self._rt_width <= 0
-        ):
+        if spot.alignment_rt is None:
             return []
         partition = self._partition(spot)
+        if self._uses_identity(spot):
+            if self._identity_rt_width <= 0:
+                return []
+            rt_bucket = int(float(spot.alignment_rt) // self._identity_rt_width)
+            found: set[int] = set()
+            for rb in (rt_bucket - 1, rt_bucket, rt_bucket + 1):
+                found.update(self._identity_buckets.get((partition, rb), ()))
+            return sorted(found)
+        if spot.alignment_mz is None or self._rt_width <= 0:
+            return []
         mz = float(spot.alignment_mz)
         pivot = float(self._config.ppm_pivot_mz)
         tolerance = max(0.0, float(self._config.mz_tolerance))
@@ -468,8 +634,60 @@ def _ms1_natural_peak_evidence(
     )
 
 
+def _same_path_alias_pairs(
+    pool: list[CandidateFeature],
+) -> list[tuple[int, int, _Ms1NaturalPeakEvidence]]:
+    """One-to-one alias pairs *within* one detection path, deterministically.
+
+    :func:`_ms1_natural_peak_evidence` can only clear a same-path pair on its
+    ``same_source_exact`` branch — bit-identical integration bounds and height
+    out of one raw file — so what this heals is a duplicate mass-slice
+    candidate, not a second detector's view of the same peak. That branch was
+    structurally unreachable until now: the candidate generation below only ever
+    drew edges *between* the two paths, which made ``dual_path`` permanently
+    true.
+
+    Within one path this is a general graph rather than a bipartite one, so the
+    augmenting-path matcher does not apply. Greedy over pairs ordered by
+    evidence quality then cell priority is a *maximal* matching; on a relation
+    this tight the components are cliques of near-identical slices, where a
+    maximum matching has the same cardinality.
+
+    ``pool`` must already be sorted by ``align_mz``.
+    """
+    pool_mz = [float(peak.align_mz) for peak in pool]
+    candidates: list[tuple[int, int, _Ms1NaturalPeakEvidence]] = []
+    for left_idx, left in enumerate(pool):
+        hi = bisect.bisect_right(pool_mz, pool_mz[left_idx] + 0.01)
+        for right_idx in range(left_idx + 1, hi):
+            evidence = _ms1_natural_peak_evidence(left, pool[right_idx])
+            if evidence is not None:
+                candidates.append((left_idx, right_idx, evidence))
+    candidates.sort(key=lambda item: (
+        item[2].rt_delta,
+        item[2].mz_delta,
+        -item[2].peak_overlap_ratio,
+        -item[2].height_ratio,
+        _cell_priority(pool[item[0]]),
+        _cell_priority(pool[item[1]]),
+    ))
+
+    matched: list[tuple[int, int, _Ms1NaturalPeakEvidence]] = []
+    taken: set[int] = set()
+    for left_idx, right_idx, evidence in candidates:
+        if left_idx in taken or right_idx in taken:
+            continue
+        taken.add(left_idx)
+        taken.add(right_idx)
+        matched.append((left_idx, right_idx, evidence))
+    return matched
+
+
 def collapse_ms1_natural_peak_aliases(
     features_by_sample: dict[str, list[CandidateFeature]],
+    *,
+    enabled: bool = True,
+    same_path: bool = False,
 ) -> tuple[
     dict[str, list[CandidateFeature]],
     dict[tuple[str, int], list[FoldedPeak]],
@@ -481,11 +699,26 @@ def collapse_ms1_natural_peak_aliases(
     and MS2-driven views of one integrated peak in two neighbouring masters.
     The later spot reconciler cannot safely undo that topology once unrelated
     samples have been attached to both rows.
+
+    ``same_path`` adds a second, opt-in pass over the peaks the first one left
+    alone, joining ``ms1_driven`` to ``ms1_driven`` and ``ms2_driven`` to
+    ``ms2_driven`` on ``same_source_exact`` evidence (see
+    :func:`_same_path_alias_pairs`). It runs *after* the dual-path pass and only
+    on what that pass did not consume, so turning it on never perturbs a fold
+    the shipped behaviour already made.
     """
+    n_input = sum(len(peaks) for peaks in features_by_sample.values())
+    if not enabled:
+        return features_by_sample, {}, PrejoinAliasStats(
+            n_input_candidates=n_input,
+            n_output_candidates=n_input,
+            n_ms1_aliases_folded=0,
+        )
+
     filtered: dict[str, list[CandidateFeature]] = {}
     folds_by_winner: dict[tuple[str, int], list[FoldedPeak]] = {}
-    n_input = sum(len(peaks) for peaks in features_by_sample.values())
     n_folded = 0
+    n_same_path = 0
 
     for sample_id in sorted(features_by_sample):
         peaks = features_by_sample[sample_id]
@@ -552,6 +785,33 @@ def collapse_ms1_natural_peak_aliases(
             augment(left_idx, set())
 
         consumed: set[int] = set()
+
+        def fold_into(
+            keeper: CandidateFeature,
+            alias: CandidateFeature,
+            evidence: _Ms1NaturalPeakEvidence,
+        ) -> None:
+            nonlocal n_folded
+            consumed.add(id(alias))
+            n_folded += 1
+            # The alias may already be keeping folds of its own. They name the
+            # alias, not the new keeper, so their ``target_peak_id`` stays as it
+            # is; moving the bucket only guarantees they land in the *same* spot,
+            # where ``audit_spots`` resolves the alias -> keeper link.
+            inherited = folds_by_winner.pop((sample_id, id(alias)), [])
+            bucket = folds_by_winner.setdefault((sample_id, id(keeper)), [])
+            bucket.append(FoldedPeak(
+                sample_id=sample_id,
+                peak=alias,
+                reason="ms1_natural_peak_alias",
+                target_peak_id=str(keeper.feature_id),
+                cosine=0.0,
+                n_matched_fragments=0,
+                evidence_kind="ms1_natural_peak",
+                evidence_details=evidence.details,
+            ))
+            bucket.extend(inherited)
+
         matched = sorted(
             [
                 (
@@ -569,20 +829,27 @@ def collapse_ms1_natural_peak_aliases(
             keeper, alias = min((left, right), key=_cell_priority), max(
                 (left, right), key=_cell_priority,
             )
-            consumed.add(id(alias))
-            n_folded += 1
-            folds_by_winner.setdefault(
-                (sample_id, id(keeper)), [],
-            ).append(FoldedPeak(
-                sample_id=sample_id,
-                peak=alias,
-                reason="ms1_natural_peak_alias",
-                target_peak_id=str(keeper.feature_id),
-                cosine=0.0,
-                n_matched_fragments=0,
-                evidence_kind="ms1_natural_peak",
-                evidence_details=evidence.details,
-            ))
+            fold_into(keeper, alias, evidence)
+
+        if same_path:
+            for path in ("ms1_driven", "ms2_driven"):
+                pool = sorted(
+                    (
+                        peak for peak in peaks
+                        if peak.quant_route == MS1
+                        and peak.align_mz is not None
+                        and peak.detection_source == path
+                        and id(peak) not in consumed
+                    ),
+                    key=lambda peak: (float(peak.align_mz), _cell_priority(peak)),
+                )
+                for left_idx, right_idx, evidence in _same_path_alias_pairs(pool):
+                    left, right = pool[left_idx], pool[right_idx]
+                    keeper, alias = min((left, right), key=_cell_priority), max(
+                        (left, right), key=_cell_priority,
+                    )
+                    fold_into(keeper, alias, evidence)
+                    n_same_path += 1
 
         filtered[sample_id] = [
             peak for peak in peaks if id(peak) not in consumed
@@ -592,6 +859,7 @@ def collapse_ms1_natural_peak_aliases(
         n_input_candidates=n_input,
         n_output_candidates=n_input - n_folded,
         n_ms1_aliases_folded=n_folded,
+        n_same_path_aliases_folded=n_same_path,
     )
 
 
@@ -759,7 +1027,17 @@ def _spots_are_mergeable(
     ):
         return True
 
-    evidence = _spot_identity(left, right, spectra, joiner_config)
+    # When the m/z gate has been dropped for this route the spectra are the only
+    # evidence left, so they are held to the redundancy pass's own cosine rather
+    # than the joiner's. The joiner's is a *veto* threshold — it only has to
+    # catch pairs geometry got wrong — and it is deliberately looser.
+    identity_config = joiner_config
+    if left.quant_route in refiner_config.merge_identity_routes:
+        identity_config = replace(
+            joiner_config,
+            ms2_identity_threshold=refiner_config.ms2_identity_threshold,
+        )
+    evidence = _spot_identity(left, right, spectra, identity_config)
     if evidence.state is IdentityState.DIFFERENT:
         stats.n_identity_different_rejected += 1
         return False
@@ -837,6 +1115,7 @@ def _merge_cluster(
     cell_plans: dict[str, _CellPlan],
     spectra: _Spectra,
     stats: ReconcileStats,
+    gap_config: Optional[GapFillConfig] = None,
 ) -> None:
     stats.n_merged_spots += len(losers)
     original_keeper_samples = set(keeper.peaks)
@@ -895,7 +1174,7 @@ def _merge_cluster(
     # cell survived.  Re-run the full representative rule so a stronger
     # spectrum/annotation transferred from a loser can become authoritative.
     _choose_representative(keeper, spectra)
-    recompute_alignment_center(keeper)
+    recompute_alignment_center(keeper, gap_config)
 
 
 def _natural_sample_ids(spot: AlignmentSpot) -> frozenset[str]:
@@ -930,6 +1209,7 @@ def _complete_disjoint_ms1_spots(
     refiner_config: RefinerConfig,
     is_annotated: Callable[[CandidateFeature], bool],
     stats: ReconcileStats,
+    gap_config: Optional[GapFillConfig] = None,
 ) -> list[AlignmentSpot]:
     """Complete rows split across disjoint samples after centres are stable.
 
@@ -1009,7 +1289,8 @@ def _complete_disjoint_ms1_spots(
                     "disjoint MS1 completion lost its cell plan: "
                     f"{cell_state}"
                 )
-            _merge_cluster(keeper, cluster[1:], cell_plans, spectra, stats)
+            _merge_cluster(keeper, cluster[1:], cell_plans, spectra, stats,
+                           gap_config)
             stats.n_disjoint_ms1_spots_merged += len(cluster) - 1
         completed.append(keeper)
     return completed
@@ -1022,6 +1303,7 @@ def reconcile_spots(
     *,
     is_annotated: Callable[[CandidateFeature], bool],
     ms2_reader: Optional[Ms2Reader] = None,
+    gap_config: Optional[GapFillConfig] = None,
 ) -> tuple[list[AlignmentSpot], ReconcileStats]:
     """Merge only reliable same-route duplicates before any gap is filled.
 
@@ -1039,22 +1321,36 @@ def reconcile_spots(
         # natural detection in an otherwise hidden singleton; merely choosing
         # among ``spot.peaks`` would then leave the hidden cell as keeper.
         if spot.folded_peaks:
-            cell_plans, cell_state = _cluster_cell_plans(
+            cell_plans, _cell_state = _cluster_cell_plans(
                 [spot], spectra, joiner_config,
             )
             if cell_plans is None:
-                raise RuntimeError(
-                    "joiner fold has no visible direct-SAME cell keeper: "
-                    f"spot={spot.index}, identity={cell_state}"
-                )
-            _merge_cluster(spot, [], cell_plans, spectra, stats)
+                # No single alternative is SAME with every other one. That is a
+                # real gap in the evidence, not a broken invariant: a sample can
+                # hold an MS1 alias of peak P and another of peak Q where P and
+                # Q were joined on their MS2, and an MS1 alias witness is only
+                # ever direct — it says "these two rows are one chromatographic
+                # peak", and it has nothing to say about a third row. The star
+                # cannot close, and no amount of re-planning will close it.
+                #
+                # Keep the assignment the joiner made. Every fold still names
+                # the peak it was folded onto and carries the evidence for that
+                # one pair, so conservation and the audit trail are intact; the
+                # only thing forgone is a possible visibility upgrade of one
+                # cell. Measured incidence: 1 spot of 2,550 folded spots on
+                # cancer, 0 on rice and on the benchmark.
+                stats.n_cell_plans_unresolved += 1
+                _choose_representative(spot, spectra)
+                recompute_alignment_center(spot, gap_config)
+                continue
+            _merge_cluster(spot, [], cell_plans, spectra, stats, gap_config)
         else:
             # Do this for every spot, including singletons: the joiner's
             # strongest spectrum can belong to a row Stage 4-6 already hid.
             # A visible member must represent the combined row before keeper
             # priority is evaluated.
             _choose_representative(spot, spectra)
-            recompute_alignment_center(spot)
+            recompute_alignment_center(spot, gap_config)
 
     # Visible spots are considered first.  A pre-hidden row may be absorbed by
     # a visible keeper, but can never establish the slot that hides one.
@@ -1134,10 +1430,10 @@ def reconcile_spots(
                     f"reconciliation cluster lost its cell plan: {cell_state}"
                 )
             _merge_cluster(
-                keeper, cluster[1:], cell_plans, spectra, stats,
+                keeper, cluster[1:], cell_plans, spectra, stats, gap_config,
             )
         else:
-            recompute_alignment_center(keeper)
+            recompute_alignment_center(keeper, gap_config)
         reconciled.append(keeper)
 
     completed = _complete_disjoint_ms1_spots(
@@ -1147,9 +1443,72 @@ def reconcile_spots(
         refiner_config,
         is_annotated,
         stats,
+        gap_config,
     )
     stats.n_output_spots = len(completed)
     return completed, stats
+
+
+def spots_from_clusters(
+    clusters: list[Cluster],
+    identity_config: IdentityConfig,
+    *,
+    ms2_reader: Optional[Ms2Reader] = None,
+    gap_config: Optional[GapFillConfig] = None,
+    cache_size: int = 4096,
+) -> list[AlignmentSpot]:
+    """Turn compound clusters into the one-cell-per-sample rows Stage 7 carries.
+
+    Clustering deliberately lets one sample contribute several observations —
+    "one cell per sample" is a *quantitation* constraint, not a grouping one, and
+    forcing it during grouping is what made the old joiner need a matching
+    algorithm plus a conservation loop to rescue its own losers.
+
+    Resolving it here is therefore the whole cost of that freedom, and for now it
+    is resolved the cheap way: the highest-priority observation takes the cell and
+    the rest are folded, each naming the cell it lost to and carrying the verdict
+    that says they are the same compound. Nothing is re-integrated yet — until a
+    row has one quantitation channel, there is no ion to re-integrate *on*, and
+    picking one is the next step.
+    """
+    spectra = _Spectra(ms2_reader, cache_size)
+    spots: list[AlignmentSpot] = []
+    for index, cluster in enumerate(clusters):
+        by_sample: dict[str, list[CandidateFeature]] = {}
+        for sample_id, peak in cluster.members:
+            by_sample.setdefault(sample_id, []).append(peak)
+
+        founder_sample, founder = cluster.members[0]
+        spot = AlignmentSpot(
+            index=index,
+            master_mz=float(founder.align_mz),
+            master_rt=float(founder.rt_apex),
+            origin_sample_id=founder_sample,
+        )
+        for sample_id in sorted(by_sample):
+            candidates = sorted(by_sample[sample_id], key=_cell_priority)
+            winner = candidates[0]
+            spot.peaks[sample_id] = winner
+            for loser in candidates[1:]:
+                verdict = identity(
+                    observation_of(loser, lambda p=loser: spectra.get(sample_id, p)),
+                    observation_of(winner, lambda p=winner: spectra.get(sample_id, p)),
+                    identity_config,
+                )
+                spot.folded_peaks.append(FoldedPeak(
+                    sample_id=sample_id,
+                    peak=loser,
+                    reason="same_compound_cluster_member",
+                    target_peak_id=str(winner.feature_id),
+                    cosine=float(verdict.cosine),
+                    n_matched_fragments=int(verdict.n_matched_fragments),
+                    evidence_kind="tiered_identity",
+                    evidence_details={"tier": int(verdict.tier)},
+                ))
+        _choose_representative(spot, _Spectra(ms2_reader, cache_size))
+        recompute_alignment_center(spot, gap_config, vote_window=True)
+        spots.append(spot)
+    return spots
 
 
 def audit_conservation(
@@ -1194,8 +1553,18 @@ def audit_spots(
     spots: list[AlignmentSpot],
     joiner_config: JoinerConfig,
     ms2_reader: Optional[Ms2Reader] = None,
+    gap_config: Optional[GapFillConfig] = None,
+    *,
+    identity_config: Optional[IdentityConfig] = None,
+    vote_window: bool = False,
+    is_annotated: Optional[Callable[[CandidateFeature], bool]] = None,
 ) -> SpotAudit:
-    """Audit final cells without depending on transient object identities."""
+    """Audit final cells without depending on transient object identities.
+
+    ``vote_window`` must match what the run used (see
+    :func:`recompute_alignment_center`), or the consensus checks audit a contract
+    the run never signed.
+    """
     cell_statuses = {"detected": 0, "filled": 0, "no_signal": 0}
     membership: list[list[str]] = []
     assigned_tokens: list[str] = []
@@ -1207,6 +1576,9 @@ def audit_spots(
     ms1_evidence_mismatch = 0
     hidden_keepers = 0
     rt_mismatch = mz_mismatch = window_mismatch = segment_mismatch = 0
+    window_span_violations = segment_mismatch_spots = cross_route_spots = 0
+    conflicting_annotation_spots = 0
+    conflicting_examples: list[tuple] = []
     n_folds = 0
 
     spectra = _Spectra(ms2_reader, joiner_config.ms2_cache_size)
@@ -1238,6 +1610,8 @@ def audit_spots(
         routes = {peak.quant_route for _sample_id, peak in natural}
         if len(routes) > 1:
             mixed_routes += 1
+        if len({str(peak.signal_type) for _sample_id, peak in natural}) > 1:
+            cross_route_spots += 1
         product_peaks = [
             peak for _sample_id, peak in natural if peak.quant_route == PRODUCT
         ]
@@ -1248,14 +1622,75 @@ def audit_spots(
         if len(segments) > 1:
             product_multi_segment += 1
 
-        for fold in spot.folded_peaks:
-            n_folds += 1
+        if is_annotated is not None:
+            names = {
+                str(
+                    peak.annotation_matches[int(peak.selected_annotation_idx)].name
+                    or ""
+                )
+                for _sample_id, peak in natural
+                if peak.annotation_matches
+                and 0 <= int(peak.selected_annotation_idx)
+                < len(peak.annotation_matches)
+                and is_annotated(peak)
+            }
+            names.discard("")
+            if len(names) > 1:
+                conflicting_annotation_spots += 1
+                if len(conflicting_examples) < 50:
+                    conflicting_examples.append((spot.index, tuple(sorted(names))))
+
+        # INV-3 / INV-4, over *every* natural member rather than the PRODUCT ones.
+        windows = {int(peak.precursor_mz_nominal) for _sample_id, peak in natural}
+        if windows and max(windows) - min(windows) > 1:
+            window_span_violations += 1
+        all_segments = {
+            str(peak.segment_name or "") for _sample_id, peak in natural
+        }
+        all_segments.discard("")
+        if len(all_segments) > 1:
+            segment_mismatch_spots += 1
+
+        # A fold may name another fold of the same sample rather than the
+        # assigned cell: an MS1 alias witness points at the row it is an alias
+        # *of*, and that row can afterwards lose the claim and be folded itself.
+        # The chain is still sound — the evidence on each link is checked below
+        # against the peak that link actually names — so resolve through it
+        # rather than calling the record orphaned.
+        folds_by_id = {
+            (fold.sample_id, str(fold.peak.feature_id)): fold
+            for fold in spot.folded_peaks
+        }
+
+        def _fold_target(fold: FoldedPeak) -> Optional[CandidateFeature]:
+            """The peak this fold names, whether it is a cell or another fold."""
             assigned = spot.peaks.get(fold.sample_id)
             if (
-                assigned is None
-                or assigned.gap_fill_status != "detected"
-                or str(fold.target_peak_id) != str(assigned.feature_id)
+                assigned is not None
+                and assigned.gap_fill_status == "detected"
+                and str(fold.target_peak_id) == str(assigned.feature_id)
             ):
+                return assigned
+            seen: set[str] = {str(fold.peak.feature_id)}
+            link = folds_by_id.get((fold.sample_id, str(fold.target_peak_id)))
+            while link is not None:
+                token = str(link.peak.feature_id)
+                if token in seen:
+                    return None                     # a cycle is a broken chain
+                seen.add(token)
+                if (
+                    assigned is not None
+                    and assigned.gap_fill_status == "detected"
+                    and str(link.target_peak_id) == str(assigned.feature_id)
+                ):
+                    return link.peak
+                link = folds_by_id.get((fold.sample_id, str(link.target_peak_id)))
+            return None
+
+        for fold in spot.folded_peaks:
+            n_folds += 1
+            assigned = _fold_target(fold)
+            if assigned is None:
                 missing_targets += 1
                 continue
             if fold.evidence_kind == "ms1_natural_peak":
@@ -1279,6 +1714,31 @@ def audit_spots(
                 if not details_match:
                     evidence_mismatch += 1
                     ms1_evidence_mismatch += 1
+                continue
+            if fold.evidence_kind == "tiered_identity":
+                # Same rule the clustering used, re-run on the pair the record
+                # names. Verified rather than trusted: the fold is the only
+                # remaining trace of an observation that reaches no cell.
+                verdict = identity(
+                    observation_of(
+                        fold.peak,
+                        lambda p=fold: spectra.get(p.sample_id, p.peak),
+                    ),
+                    observation_of(
+                        assigned,
+                        lambda s=fold.sample_id, p=assigned: spectra.get(s, p),
+                    ),
+                    identity_config or IdentityConfig(),
+                )
+                if verdict.state is not IdentityState.SAME:
+                    identity_not_same += 1
+                if (
+                    verdict.n_matched_fragments != fold.n_matched_fragments
+                    or not math.isclose(
+                        verdict.cosine, fold.cosine, rel_tol=0.0, abs_tol=1e-12,
+                    )
+                ):
+                    evidence_mismatch += 1
                 continue
             if fold.evidence_kind != "ms2_identity":
                 evidence_mismatch += 1
@@ -1321,8 +1781,22 @@ def audit_spots(
                 detected,
                 key=lambda peak: (-(peak.ms1_height or 0.0), str(peak.feature_id)),
             )
+            # The consensus ion is a vote across the detected cells when a
+            # gap-fill view is available, and the tallest cell's ion when it is
+            # not — audit whichever contract the run actually used.
+            expected_ion = (
+                choose_quant_channel(
+                    detected,
+                    spot.peaks.get(spot.representative_sample_id)
+                    if spot.representative_sample_id else None,
+                    gap_config,
+                )
+                if gap_config is not None else None
+            )
             expected_mz = (
-                float(tallest.align_mz) if tallest.align_mz is not None else None
+                float(expected_ion.mz) if expected_ion is not None
+                else float(tallest.align_mz) if tallest.align_mz is not None
+                else None
             )
             if spot.alignment_rt is None or not math.isclose(
                 float(spot.alignment_rt), expected_rt, rel_tol=0.0, abs_tol=1e-12,
@@ -1332,9 +1806,12 @@ def audit_spots(
                 float(spot.alignment_mz), expected_mz, rel_tol=0.0, abs_tol=1e-12,
             ):
                 mz_mismatch += 1
-            if spot.alignment_window != int(tallest.precursor_mz_nominal):
+            expected_window, expected_segment = consensus_window_segment(
+                detected, vote_window,
+            )
+            if spot.alignment_window != expected_window:
                 window_mismatch += 1
-            if spot.alignment_segment != str(tallest.segment_name or ""):
+            if spot.alignment_segment != expected_segment:
                 segment_mismatch += 1
 
     membership.sort()
@@ -1363,4 +1840,9 @@ def audit_spots(
         membership_sha256=_digest(membership),
         assigned_detected_sha256=_digest(assigned_tokens),
         natural_source_sha256=_digest(source_tokens),
+        n_window_span_violations=window_span_violations,
+        n_segment_mismatch_spots=segment_mismatch_spots,
+        n_cross_route_spots=cross_route_spots,
+        n_conflicting_annotation_spots=conflicting_annotation_spots,
+        conflicting_annotation_examples=tuple(conflicting_examples),
     )

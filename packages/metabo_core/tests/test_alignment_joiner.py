@@ -950,3 +950,270 @@ def test_reliable_lost_classification_requires_enough_matched_fragments():
     assert stats.n_lost_unjudgeable == 1
     assert stats.n_lost_same_compound == 0
     assert stats.n_lost_different_compound == 0
+
+
+# ---------------------------------------------------------------------------
+# The two extra ways into a box (drift / identity)
+# ---------------------------------------------------------------------------
+
+def _spectrum(shift: float = 0.0) -> list[tuple[float, float]]:
+    return [(85.03 + shift, 100.0), (110.05 + shift, 60.0),
+            (150.07 + shift, 40.0), (203.11 + shift, 20.0)]
+
+
+def test_drift_path_joins_one_compound_that_eluted_late():
+    """Same quantitation ion, RT further apart than ``rt_tolerance``.
+
+    ``rt_tolerance`` was calibrated on pairs that already matched, which cannot
+    see a pair drift pushed outside the window. Off by default; opting in has to
+    join them rather than give the later one a row of its own.
+    """
+    features = {
+        "a": [_ms2_only("a1", 150.07, 1.00, window=300, ms2=_spectrum())],
+        "b": [_ms2_only("b1", 150.07, 1.28, window=300, ms2=_spectrum())],
+    }
+    off, _ = join_spots(features, _config(rt_tolerance=0.2))
+    assert len(off) == 2
+
+    on, stats = join_spots(
+        features, _config(rt_tolerance=0.2, drift_rt_tolerance=0.5),
+    )
+    assert len(on) == 1
+    assert set(on[0].peaks) == {"a", "b"}
+    assert stats.n_suppressed_by_path == {"drift": 1}
+
+
+def test_identity_path_joins_one_compound_whose_representative_ion_flipped():
+    """Two near-tied fragments, and the argmax landed differently per sample.
+
+    The peaks are one compound: same isolation window, same RT, MS2 identical.
+    They key on different fragments only because ``ms2_rep_ion_mz`` is the
+    tallest one and 150.07 edged out 85.03 in the second sample.
+    """
+    a_spectrum = [(85.03, 100.0), (150.07, 99.0), (203.11, 40.0)]
+    b_spectrum = [(85.03, 99.0), (150.07, 100.0), (203.11, 40.0)]
+    features = {
+        "a": [_ms2_only("a1", 85.03, 1.0, window=300, ms2=a_spectrum)],
+        "b": [_ms2_only("b1", 150.07, 1.0, window=300, ms2=b_spectrum)],
+    }
+    off, _ = join_spots(features, _config(rt_tolerance=0.2))
+    assert len(off) == 2, "keying on the argmax splits them"
+
+    on, stats = join_spots(features, _config(
+        rt_tolerance=0.2,
+        identity_rt_tolerance=0.5,
+        identity_match_routes=(PRODUCT,),
+        use_reliable_ms2_identity=True,
+    ))
+    assert len(on) == 1
+    assert set(on[0].peaks) == {"a", "b"}
+    assert stats.n_suppressed_by_path == {"identity": 1}
+
+
+def test_identity_path_refuses_a_different_compound_in_the_same_window():
+    """Dropping the m/z key does not drop the evidence — the spectra must agree."""
+    features = {
+        "a": [_ms2_only("a1", 85.03, 1.0, window=300, ms2=_spectrum())],
+        "b": [_ms2_only("b1", 311.20, 1.0, window=300,
+                        ms2=[(311.2, 100.0), (270.0, 50.0), (99.9, 30.0)])],
+    }
+    spots, _ = join_spots(features, _config(
+        rt_tolerance=0.2,
+        identity_rt_tolerance=0.5,
+        identity_match_routes=(PRODUCT,),
+        use_reliable_ms2_identity=True,
+    ))
+    assert len(spots) == 2
+
+
+def test_identity_path_refuses_across_isolation_windows():
+    """A shared fragment is not identity when the precursors were different.
+
+    85.03 and 69.03 are shared by many co-eluting precursors; the isolation
+    window is the only thing keeping them apart, so the identity path may not
+    reach across one.
+    """
+    features = {
+        "a": [_ms2_only("a1", 85.03, 1.0, window=300, ms2=_spectrum())],
+        "b": [_ms2_only("b1", 85.03, 1.0, window=700, ms2=_spectrum())],
+    }
+    spots, _ = join_spots(features, _config(
+        rt_tolerance=0.2,
+        identity_rt_tolerance=0.5,
+        identity_match_routes=(PRODUCT,),
+        use_reliable_ms2_identity=True,
+    ))
+    assert len(spots) == 2
+
+
+def test_ms1_route_never_takes_the_identity_path():
+    """An ASFAM MS1 feature's spectrum describes its whole co-eluting segment.
+
+    Two MS1 peaks in one isolation window therefore carry near-identical
+    spectra even when they are a compound and its own isotope. Enabling the path
+    for PRODUCT must not enable it here.
+    """
+    features = {
+        "a": [_feat("a1", 300.10, 1.0, quant_mz=300.10, ms2=_spectrum())],
+        "b": [_feat("b1", 300.10, 1.0, quant_mz=301.10, ms2=_spectrum())],
+    }
+    spots, _ = join_spots(features, _config(
+        rt_tolerance=0.2,
+        identity_rt_tolerance=0.5,
+        identity_match_routes=(PRODUCT,),
+        use_reliable_ms2_identity=True,
+        use_ms2_identity_for_ms1=False,
+    ))
+    assert len(spots) == 2
+
+
+def test_extra_paths_are_off_by_default():
+    """Shared-core callers, DDA included, keep the historical box."""
+    config = JoinerConfig()
+    assert config.drift_rt_tolerance == 0.0
+    assert config.identity_rt_tolerance == 0.0
+    assert config.identity_match_routes == ()
+
+
+def test_default_box_is_exactly_the_old_geometry_and_veto():
+    """Under shared-core defaults the three paths collapse back to one.
+
+    DDA and every other shared-core caller run on these defaults, so the
+    refactor that introduced ``drift``/``identity`` must be a no-op for them.
+    Checked against the old rule spelled out directly — ``_in_box`` (the
+    geometry) AND ``_same_compound`` (the veto) — over randomized pairs, rather
+    than trusting that reading the branches is enough.
+    """
+    from metabo_core.alignment.joiner import (
+        _in_box, _key_of, _match_kind, _same_compound, _MasterPeak, _Spec,
+    )
+
+    config = JoinerConfig()
+    cache = _cache(config)
+    rng = random.Random(20260728)
+    checked = matched = 0
+    for i in range(3000):
+        route_is_product = rng.random() < 0.5
+        m_mz = 300.0 + rng.uniform(-0.06, 0.06)
+        t_mz = 300.0 + rng.uniform(-0.06, 0.06)
+        m_rt, t_rt = 5.0 + rng.uniform(-0.6, 0.6), 5.0 + rng.uniform(-0.6, 0.6)
+        spectrum = [(85.03, rng.uniform(1, 100)), (150.07, rng.uniform(1, 100)),
+                    (203.11, rng.uniform(1, 100))]
+        other = [(85.03, rng.uniform(1, 100)), (150.07, rng.uniform(1, 100)),
+                 (203.11, rng.uniform(1, 100))]
+        if route_is_product:
+            master_peak = _ms2_only(f"m{i}", m_mz, m_rt,
+                                    window=300 + rng.choice([0, 0, 400]),
+                                    ms2=spectrum)
+            target_peak = _ms2_only(f"t{i}", t_mz, t_rt, window=300, ms2=other)
+        else:
+            master_peak = _feat(f"m{i}", m_mz, m_rt, quant_mz=m_mz, ms2=spectrum)
+            target_peak = _feat(f"t{i}", t_mz, t_rt, quant_mz=t_mz, ms2=other)
+
+        key = _key_of(target_peak)
+        master = _MasterPeak(
+            float(master_peak.align_mz), master_peak.rt_apex,
+            master_peak.quant_route, int(master_peak.precursor_mz_nominal),
+            "a", master_peak, str(master_peak.segment_name or ""),
+        )
+        spec = _Spec(cache, "b", target_peak)
+        old = (
+            _in_box(master, key, config.mz_tolerance, config.rt_tolerance)
+            and _same_compound(master, spec, config, cache)
+        )
+        new = _match_kind(master, key, spec, config, cache)
+        assert bool(new) == old, (i, new, old)
+        assert new in (None, "box")
+        checked += 1
+        matched += bool(new)
+    assert checked == 3000
+    assert 0 < matched < checked, "the fixture must produce both outcomes"
+
+
+# ---------------------------------------------------------------------------
+# Four-tier identity rule, opt-in (SPEC 2026-08-02 §6)
+# ---------------------------------------------------------------------------
+
+def _tiered_config(**kw) -> JoinerConfig:
+    """ASFAM's joiner view, plus the tiered rule."""
+    base = dict(
+        rt_tolerance=0.2, mz_tolerance=0.02,
+        use_reliable_ms2_identity=True, conserve_detected_peaks=True,
+        use_ms2_identity_for_ms1=False,
+        drift_rt_tolerance=0.5, identity_rt_tolerance=0.5,
+        identity_match_routes=(PRODUCT,), identity_match_threshold=0.7,
+        use_tiered_identity=True,
+    )
+    base.update(kw)
+    return JoinerConfig(**base)
+
+
+def _kind(master_peak, target_peak, config):
+    from metabo_core.alignment.joiner import (
+        _key_of, _match_kind, _MasterPeak, _Spec,
+    )
+    cache = _cache(config)
+    master = _MasterPeak(
+        float(master_peak.align_mz), master_peak.rt_apex,
+        master_peak.quant_route, int(master_peak.precursor_mz_nominal),
+        "a", master_peak, str(master_peak.segment_name or ""),
+    )
+    return _match_kind(master, _key_of(target_peak), _Spec(cache, "b", target_peak), config, cache)
+
+
+@pytest.mark.parametrize("quant_mz_set", [True, False])
+def test_tiered_identity_lets_a_peak_match_the_master_it_founded(quant_mz_set):
+    """Reflexivity. Not a tautology -- it is the bug this rule first shipped with.
+
+    ``align_mz`` falls back to ``ms1_precursor_mz`` when ``ms1_quant_mz`` is
+    unset, which is the normal DDA shape. Dispatching the tier on
+    ``ms1_quant_mz`` alone then routes such a peak to tier 2 -- "neither side has
+    a precursor" -- where the only fallback key is a representative *fragment*
+    that an MS1-route peak does not have. Every peak was UNJUDGEABLE against its
+    own master and the whole join collapsed.
+    """
+    spectrum = [(85.03, 100.0), (150.07, 60.0), (203.11, 20.0)]
+    peak = _feat("p", 300.20, 5.0, ms2=spectrum,
+                 quant_mz=300.20 if quant_mz_set else None)
+
+    assert _kind(peak, peak, _tiered_config()) == "box"
+
+
+def test_tiered_identity_vetoes_ms1_pairs_the_route_exemption_waved_through():
+    """The measurable point of tier 1 (SPEC §6.3).
+
+    ``use_ms2_identity_for_ms1=False`` exempts MS1-route pairs from any spectral
+    check at all, so two different compounds sharing a quantitation ion and an RT
+    land in one box. Tier 1 keeps the bar low -- the shared ion is real evidence
+    and the two ASFAM detection paths deconvolve differently -- but not absent.
+    """
+    agree = [(85.03, 100.0), (150.07, 60.0), (203.11, 20.0)]
+    # Same three ions, intensity order reversed: matchable (n_matched = 3, so
+    # the cosine is evidence) and scoring 0.19, below theta_veto's 0.2.
+    contradict = [(85.03, 1.0), (150.07, 2.0), (203.11, 100.0)]
+    master = _feat("m", 300.20, 5.0, quant_mz=300.20, ms2=agree)
+    similar = _feat("s", 300.21, 5.02, quant_mz=300.21, ms2=agree)
+    opposed = _feat("o", 300.21, 5.02, quant_mz=300.21, ms2=contradict)
+
+    exempt = _tiered_config(use_tiered_identity=False)
+    assert _kind(master, similar, exempt) == "box"
+    assert _kind(master, opposed, exempt) == "box"
+
+    tiered = _tiered_config()
+    assert _kind(master, similar, tiered) == "box"
+    assert _kind(master, opposed, tiered) is None
+
+
+def test_tiered_identity_leaves_the_joiners_rt_reach_alone():
+    """``check_geometry=False``: swapping the rule must not narrow the paths.
+
+    ``IdentityConfig.rt_window`` is 0.3 and the drift path reaches 0.5. If the
+    tiered rule re-applied its own RT gate, turning it on would silently shorten
+    the drift path by 0.2 min while claiming only to change the identity test.
+    """
+    spectrum = [(85.03, 100.0), (150.07, 60.0), (203.11, 20.0)]
+    master = _feat("m", 300.20, 5.0, quant_mz=300.20, ms2=spectrum)
+    drifted = _feat("d", 300.20, 5.45, quant_mz=300.20, ms2=spectrum)
+
+    assert _kind(master, drifted, _tiered_config(use_tiered_identity=False)) == "drift"
+    assert _kind(master, drifted, _tiered_config()) == "drift"

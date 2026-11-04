@@ -34,6 +34,7 @@ class CompositeSimilarityResult(NamedTuple):
     rdp: float          # 反向点积（query 端只用匹配峰，平方形式）
     matched_pct: float = 0.0   # 显著参考峰被匹配占比 n_matched_sig / n_sig_ref ∈[0,1]（MS-DIAL Matched%）
     total_score: float = 0.0   # MS-DIAL TotalScore（= score；范围 [0,2]，use_rt 时更高）
+    n_matched_sig: int = 0     # matched_pct 的分子：被匹配到的显著参考峰数（MS-DIAL MatchedPeaksCount）
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +570,7 @@ def composite_similarity_breakdown(
         rdp=rdp,
         matched_pct=matched_pct,
         total_score=total_score,
+        n_matched_sig=n_matched_sig,
     )
 
 
@@ -596,6 +598,74 @@ def composite_similarity(
         ms1_tolerance, rt_tolerance, use_rt,
     )
     return result.score, result.n_matched
+
+
+class EiSimilarityResult(NamedTuple):
+    """:func:`ei_similarity` 的逐分量结果。
+
+    ``wdp`` / ``sdp`` / ``rdp`` 与 :class:`CompositeSimilarityResult` 同口径
+    ——**平方**点积（各 ∈[0,1]）。``ei`` 内部对 WDP / RDP 取过 ``sqrt``。
+    """
+    ei: float
+    wdp: float
+    sdp: float
+    rdp: float
+    matched_pct: float
+    n_matched_sig: int
+
+
+# 缺谱 / 空谱的返回值。MS-DIAL 的 ``IsComparedAvailable``（``MsScanMatching.cs:26``）
+# 让每个分量退化成 -1，上层 ``ei > eiThreshold`` 于是恒为 False。这里统一返回
+# ``ei = -1.0``：数值不必与 MS-DIAL 逐位一致（它算出来是 -1/6），只要落在任何
+# 合法阈值之下，且**不能是 0.0**——0.0 会和"两张谱完全不重叠"混淆。
+_EI_UNAVAILABLE = EiSimilarityResult(-1.0, 0.0, 0.0, 0.0, 0.0, 0)
+
+
+def ei_similarity(
+    peaks_query: Optional[list[tuple[float, float]]],
+    peaks_ref: Optional[list[tuple[float, float]]],
+    mz_tolerance: float = 0.5,
+) -> EiSimilarityResult:
+    """MS-DIAL ``GetIntegratedSpectraSimilarity``（``MsScanMatching.cs:556-562``）。
+
+    整张 EI 谱的相似度，GC-MS 峰对齐的唯一谱图判据::
+
+        ei = (3·sqrt(WDP) + 2·sqrt(RDP) + 1·Matched%) / 6
+
+    权重 3 / 2 / 1 与分母 6 直接来自 MS-DIAL（``dotproductFact`` /
+    ``revDotproductFact`` / ``matchedRatioFact``）。``result.WeightedDotProduct``
+    在 MS-DIAL 里是个取 ``sqrt`` 的只读属性（``MsScanMatchResult.cs:36-38``），
+    所以这里对平方点积取 ``sqrt`` 而不是直接相加。
+
+    **非对称**：``peaks_query`` 对应 MS-DIAL 的 ``scan1``、``peaks_ref`` 对应
+    ``scan2``。RDP 只在**参考端**有信号的位置求和，Matched% 的分母也是参考端的
+    显著峰数——两个量都是对 ref 端算的，反了就是另一个数。
+    GC-MS 对齐里 **master 是 query、target 是 ref**
+    （``GcmsPeakJoiner.cs:142-148`` 的 ``IsSimilarTo(x, y)`` → ``CompareEIMSScanProperties(x, y, ...)``）。
+
+    ``mz_tolerance`` 默认 0.5 Da = MS-DIAL 给对齐用的 ``_msMatchParam.Ms1Tolerance``
+    （``GcmsPeakJoiner.cs:48``），单位质量 EI 谱上就是"同一根整数质量算一个 bin"。
+
+    缺谱 / 空谱返回 ``ei = -1.0``（见 :data:`_EI_UNAVAILABLE`）。
+    """
+    if not peaks_query or not peaks_ref:
+        return _EI_UNAVAILABLE
+    r = composite_similarity_breakdown(
+        peaks_query, peaks_ref, mz_tolerance=mz_tolerance,
+    )
+    ei = (
+        3.0 * math.sqrt(max(r.wdp, 0.0))
+        + 2.0 * math.sqrt(max(r.rdp, 0.0))
+        + 1.0 * r.matched_pct
+    ) / 6.0
+    return EiSimilarityResult(
+        ei=ei,
+        wdp=r.wdp,
+        sdp=r.sdp,
+        rdp=r.rdp,
+        matched_pct=r.matched_pct,
+        n_matched_sig=r.n_matched_sig,
+    )
 
 
 def _compute_three_scores(

@@ -177,8 +177,17 @@ class SetupPanel(QWidget):
         self.config.min_fragments_per_feature = self.spin_min_frags.value()
         self.config.ms1_min_height = self.spin_ms1_height.value()
         self.config.min_fragments_for_inference = self.spin_infer_frags.value()
+        self.config.retain_fragment_poor_ms2_only = self.chk_retain_fragment_poor.isChecked()
+        self.config.enable_ms2_driven_branch = self.chk_ms2_driven_branch.isChecked()
         self.config.enable_library_mz_inference = self.chk_enable_library_infer.isChecked()
         self.config.matchms_similarity_threshold = self.spin_matchms_thr.value()
+        self.config.annotation_precursor_window_by_source = {
+            "ms1_peak": self.spin_win_ms1.value(),
+            "ms1_relaxed": self.spin_win_ms1.value(),
+            "nl_consensus": self.spin_win_nl.value(),
+            "ms1_lowres": self.spin_win_lowres.value(),
+            "": self.spin_win_none.value(),
+        }
         self.config.matchms_use_rt = self.chk_use_rt.isChecked()
         # Dedup
         self.config.isotope_modified_cos_threshold = self.spin_iso_cos.value()
@@ -298,6 +307,22 @@ class SetupPanel(QWidget):
         self.spin_infer_frags.setValue(self.config.min_fragments_for_inference)
         form.addRow("Infer Min Frags:", self.spin_infer_frags)
 
+        self.chk_retain_fragment_poor = QCheckBox(
+            "Keep fragment-poor MS2-only features (exported as tier D)"
+        )
+        self.chk_retain_fragment_poor.setChecked(
+            getattr(self.config, "retain_fragment_poor_ms2_only", True)
+        )
+        form.addRow("Fragment-poor MS2-only:", self.chk_retain_fragment_poor)
+
+        self.chk_ms2_driven_branch = QCheckBox(
+            "Enable MS2-driven detection (off = MS1-driven only, for ablation)"
+        )
+        self.chk_ms2_driven_branch.setChecked(
+            getattr(self.config, "enable_ms2_driven_branch", True)
+        )
+        form.addRow("MS2-driven branch:", self.chk_ms2_driven_branch)
+
         self.chk_enable_library_infer = QCheckBox(
             "Enable library m/z inference (slow; few features benefit)"
         )
@@ -308,6 +333,19 @@ class SetupPanel(QWidget):
 
         self.spin_matchms_thr = _dbl_spin(self.config.matchms_similarity_threshold, 0, 1, 0.05, 2)
         form.addRow("Library Match Thr:", self.spin_matchms_thr)
+
+        # Library-match precursor candidate window per precursor source (Da).
+        windows = dict(
+            getattr(self.config, "annotation_precursor_window_by_source", None) or {}
+        )
+        self.spin_win_ms1 = _dbl_spin(windows.get("ms1_peak", 0.01), 0.001, 1.0, 0.005, 3)
+        self.spin_win_nl = _dbl_spin(windows.get("nl_consensus", 0.05), 0.001, 1.0, 0.05, 3)
+        self.spin_win_lowres = _dbl_spin(windows.get("ms1_lowres", 0.18), 0.001, 1.0, 0.01, 3)
+        self.spin_win_none = _dbl_spin(windows.get("", 0.5), 0.001, 1.0, 0.05, 3)
+        form.addRow("Precursor window, MS1 peak (Da):", self.spin_win_ms1)
+        form.addRow("Precursor window, NL consensus (Da):", self.spin_win_nl)
+        form.addRow("Precursor window, window centroid (Da):", self.spin_win_lowres)
+        form.addRow("Precursor window, no precursor (Da):", self.spin_win_none)
 
         self.chk_use_rt = QCheckBox("Use RT in library matching score")
         self.chk_use_rt.setChecked(self.config.matchms_use_rt)
@@ -477,10 +515,23 @@ class SetupPanel(QWidget):
         self.spin_min_frags.setValue(self.config.min_fragments_per_feature)
         self.spin_ms1_height.setValue(self.config.ms1_min_height)
         self.spin_infer_frags.setValue(self.config.min_fragments_for_inference)
+        self.chk_retain_fragment_poor.setChecked(
+            getattr(self.config, "retain_fragment_poor_ms2_only", True)
+        )
+        self.chk_ms2_driven_branch.setChecked(
+            getattr(self.config, "enable_ms2_driven_branch", True)
+        )
         self.chk_enable_library_infer.setChecked(
             getattr(self.config, "enable_library_mz_inference", False)
         )
         self.spin_matchms_thr.setValue(self.config.matchms_similarity_threshold)
+        windows = dict(
+            getattr(self.config, "annotation_precursor_window_by_source", None) or {}
+        )
+        self.spin_win_ms1.setValue(windows.get("ms1_peak", 0.01))
+        self.spin_win_nl.setValue(windows.get("nl_consensus", 0.05))
+        self.spin_win_lowres.setValue(windows.get("ms1_lowres", 0.18))
+        self.spin_win_none.setValue(windows.get("", 0.5))
         self.spin_iso_cos.setValue(self.config.isotope_modified_cos_threshold)
         self.spin_add_corr.setValue(self.config.adduct_eic_pearson_threshold)
         self.spin_isf_corr.setValue(self.config.isf_eic_pearson_threshold)

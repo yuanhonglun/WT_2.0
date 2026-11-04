@@ -15,7 +15,9 @@ from metabo_core.config.similarity import SimilarityConfig
 from metabo_core.config.annotation import AnnotationConfig, ConfidenceConfig
 from metabo_core.config.alignment import (
     AlignmentConfig,
+    ClusterConfig,
     GapFillConfig,
+    IdentityConfig,
     JoinerConfig,
     RefinerConfig,
 )
@@ -39,7 +41,9 @@ __all__ = [
     "AnnotationConfig",
     "ConfidenceConfig",
     "AlignmentConfig",
+    "ClusterConfig",
     "GapFillConfig",
+    "IdentityConfig",
     "JoinerConfig",
     "RefinerConfig",
     "RerankerConfig",

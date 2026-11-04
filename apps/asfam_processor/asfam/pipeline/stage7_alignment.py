@@ -23,13 +23,16 @@ from asfam.io.eic_store import (
 from asfam.models import CandidateFeature, Feature, RawSegmentData
 from asfam.pipeline.stage0_load import run_stage0_one_sample
 from asfam.pipeline.stage7_reconcile import (
+    ReconcileStats,
     attach_prejoin_alias_folds,
     audit_conservation,
     audit_spots,
     collapse_ms1_natural_peak_aliases,
     gap_fill_target_for_spot,
     reconcile_spots,
+    spots_from_clusters,
 )
+from metabo_core.alignment.cluster import cluster_observations
 from metabo_core.algorithms.peak_aggregation import aggregate_feature_gaussian
 from metabo_core.alignment.gap_filler import (
     MS1,
@@ -40,6 +43,9 @@ from metabo_core.alignment.gap_filler import (
     GapFillTarget,
     fill_from_chromatogram,
     make_filled_peak,
+    needs_requantitation,
+    quant_ion,
+    requantify_peak,
 )
 from metabo_core.alignment.joiner import (
     AlignmentSpot, Ms2Reader, build_feature, join_spots,
@@ -285,22 +291,65 @@ def run_stage7(
         return []
 
     join_config = config.joiner_view()
+    confidence = config.confidence_view()
+    clustered = str(config.alignment_engine) == "clustered"
     join_input, alias_folds, prejoin_stats = collapse_ms1_natural_peak_aliases(
         features_by_replicate,
+        enabled=bool(config.intra_sample_collapse_enabled),
+        same_path=bool(config.intra_sample_collapse_same_path),
     )
-    spots, join_stats = join_spots(
-        join_input, join_config, ms2_reader,
-    )
-    attach_prejoin_alias_folds(spots, alias_folds)
 
-    confidence = config.confidence_view()
-    spots, reconcile_stats = reconcile_spots(
-        spots,
-        join_config,
-        config.refiner_view(),
-        is_annotated=lambda peak: _candidate_is_high_confidence(peak, confidence),
-        ms2_reader=ms2_reader,
-    )
+    if clustered:
+        # One pass. Candidate generation carries no m/z at all, so an
+        # ms1_detected observation and an ms2_only one can be asked whether they
+        # are the same compound instead of being separated before the question.
+        clusters, join_stats = cluster_observations(
+            join_input,
+            config.cluster_view(),
+            ms2_reader,
+            is_annotated=lambda peak: _candidate_is_high_confidence(
+                peak, confidence,
+            ),
+        )
+        spots = spots_from_clusters(
+            clusters,
+            config.identity_view(),
+            ms2_reader=ms2_reader,
+            gap_config=config.gap_fill_view(),
+            cache_size=join_config.ms2_cache_size,
+        )
+        attach_prejoin_alias_folds(spots, alias_folds)
+        # Keyed on object identity: ``order_spots_by_mz`` renumbers ``spot.index``
+        # below, and the tier belongs to the cluster this spot came from.
+        # The *loosest* tier that admitted a member, not the strongest: this is
+        # a risk indicator, and a row that needed tier 3 even once is a row whose
+        # grouping rested on the tier with the weakest separating power. Taking
+        # the minimum would let one tier-1 pair hide that.
+        tier_by_spot = {
+            id(spot): (max(cluster.tiers) if cluster.tiers else 0)
+            for spot, cluster in zip(spots, clusters)
+        }
+        reconcile_stats = ReconcileStats(
+            n_input_spots=len(spots), n_output_spots=len(spots),
+        )
+    else:
+        tier_by_spot = {}
+        spots, join_stats = join_spots(
+            join_input, join_config, ms2_reader,
+        )
+        attach_prejoin_alias_folds(spots, alias_folds)
+        spots, reconcile_stats = reconcile_spots(
+            spots,
+            join_config,
+            config.refiner_view(),
+            is_annotated=lambda peak: _candidate_is_high_confidence(
+                peak, confidence,
+            ),
+            ms2_reader=ms2_reader,
+            # The consensus quantitation ion is voted across a spot's detected
+            # cells, so it is only well-defined once the cells are final.
+            gap_config=config.gap_fill_view(),
+        )
     conservation = audit_conservation(features_by_replicate, spots)
     if (
         conservation.n_unexplained_lost
@@ -319,24 +368,41 @@ def run_stage7(
     # numbering has to be settled before the first id is minted.
     spots = order_spots_by_mz(spots)
 
-    spot_audit = audit_spots(spots, join_config, ms2_reader)
-    structural_violations = {
-        name: getattr(spot_audit, name)
-        for name in (
+    spot_audit = audit_spots(
+        spots, join_config, ms2_reader, config.gap_fill_view(),
+        identity_config=config.identity_view(),
+        vote_window=clustered,
+        is_annotated=lambda peak: _candidate_is_high_confidence(peak, confidence),
+    )
+    shared_invariants = (
+        "n_same_folds_below_min_matched",
+        "n_fold_records_missing_target",
+        "n_fold_identity_not_same",
+        "n_fold_evidence_mismatch",
+        "n_hidden_keeper_with_visible_member",
+        "n_duplicate_source_tokens",
+        "n_consensus_rt_mismatch",
+        "n_consensus_mz_mismatch",
+        "n_consensus_window_mismatch",
+        "n_consensus_segment_mismatch",
+    )
+    # The route-partitioned invariants and the route-agnostic ones measure the
+    # same thing under opposite assumptions, so only one set can be enforced.
+    # n_mixed_quant_route_spots counts exactly the rows the clustered engine
+    # exists to produce; INV-3/INV-4 are what still has to hold once it does,
+    # and they check *every* natural member rather than only the PRODUCT ones.
+    enforced = shared_invariants + (
+        ("n_window_span_violations", "n_segment_mismatch_spots")
+        if clustered else
+        (
             "n_mixed_quant_route_spots",
             "n_product_multi_window_spots",
             "n_product_multi_segment_spots",
-            "n_same_folds_below_min_matched",
-            "n_fold_records_missing_target",
-            "n_fold_identity_not_same",
-            "n_fold_evidence_mismatch",
-            "n_hidden_keeper_with_visible_member",
-            "n_duplicate_source_tokens",
-            "n_consensus_rt_mismatch",
-            "n_consensus_mz_mismatch",
-            "n_consensus_window_mismatch",
-            "n_consensus_segment_mismatch",
         )
+    )
+    structural_violations = {
+        name: getattr(spot_audit, name)
+        for name in enforced
         if getattr(spot_audit, name)
     }
     if structural_violations:
@@ -354,7 +420,29 @@ def run_stage7(
             Path(mapping_output_dir) / MERGE_MAP_NAME, _spot_map(spots),
         )
 
+    # Samples with a natural detection on *any* channel, taken before gap fill
+    # because that is the only moment it is knowable: re-integrating a cell on
+    # the row's channel can find nothing and turn it into no_signal, and the
+    # evidence that the compound was in that sample would then be unrecoverable.
+    evidence_samples = {
+        spot.index: (
+            {
+                sample_id
+                for sample_id, peak in spot.peaks.items()
+                if peak.gap_fill_status == "detected"
+            }
+            | {fold.sample_id for fold in spot.folded_peaks}
+        )
+        for spot in spots
+    }
+    channel_of = {
+        spot.index: gap_fill_target_for_spot(spot, config.gap_fill_view())
+        for spot in spots
+    }
+    tier_of = {spot.index: tier_by_spot.get(id(spot), 0) for spot in spots}
+
     gap_fill_stats: dict[str, object] = {}
+    alternates: dict[tuple[int, str], tuple[float, float]] = {}
     if spots and gap_fill is not None and config.gap_fill_enabled:
         # Written in lockstep with alignment.eic below, and never on its own: the
         # two are a pair, and a run that refreshed one but not the other would
@@ -366,12 +454,45 @@ def run_stage7(
         )
         if fill_counts is not None:
             gap_fill_stats = dict(fill_counts)
+            alternates = {
+                (int(spot_index), str(sample_id)): (float(height), float(mz))
+                for spot_index, sample_id, height, mz
+                in gap_fill_stats.get("alternate_channel_cells", ())
+            }
     elif spots and gap_fill is None:
         logger.info("  Gap fill skipped: no raw data context")
     elif spots:
         logger.info("  Gap fill disabled by config")
 
+    # INV-2: every naturally detected cell reads off the row's one channel.
+    # Otherwise the row holds one sample's height off a product-ion slice beside
+    # another's off an MS1 window, and its CV and fold change mean nothing.
+    #
+    # Re-integrating a cell onto that channel needs raw data, so this is an
+    # invariant *of gap filling*, not of alignment: it is enforced only where gap
+    # filling actually ran, and merely counted otherwise. The count is worth
+    # having either way — without gap fill it is the size of the re-integration
+    # job the run is deferring.
+    off_channel = [
+        (spot.index, sample_id)
+        for spot in spots
+        for sample_id, peak in spot.peaks.items()
+        if (channel_of.get(spot.index) is not None
+            and needs_requantitation(
+                peak, channel_of[spot.index], config.gap_fill_view(),
+            ))
+    ]
+    if off_channel and gap_fill_stats:
+        raise RuntimeError(
+            "Stage 7 INV-2 failed: "
+            f"{len(off_channel)} detected cells are quantified on an ion other "
+            f"than their row's channel, e.g. "
+            + ", ".join(f"F{i:05d}/{s}" for i, s in off_channel[:10])
+        )
+
     spot_audit_values = asdict(spot_audit)
+    spot_audit_values["n_off_channel_detected_cells"] = len(off_channel)
+    spot_audit_values["off_channel_enforced"] = bool(gap_fill_stats)
     final_statuses = Counter(
         peak.gap_fill_status for spot in spots for peak in spot.peaks.values()
     )
@@ -395,6 +516,21 @@ def run_stage7(
         feature.isotope_index = rep.isotope_index
         feature.isotope_group_id = rep.isotope_group_id
         feature.adduct_group_id = rep.adduct_group_id
+        # SPEC 8.2 / 8.3.1: one channel per row, and two detection counts --
+        # "detected on this row's channel" and "detected on any channel". They
+        # differ exactly where a cross-channel re-integration came back empty.
+        channel = channel_of.get(spot.index)
+        feature.quant_channel = channel.quant.kind if channel is not None else ""
+        evidence = evidence_samples.get(spot.index, set())
+        feature.n_detected_evidence = max(len(evidence), feature.n_detected)
+        feature.detection_rate_evidence = (
+            feature.n_detected_evidence / n_samples if n_samples else 0.0
+        )
+        feature.identity_tier = tier_of.get(spot.index, 0)
+        for (spot_index, sample_id), (height, mz) in alternates.items():
+            if spot_index == spot.index:
+                feature.alternate_channel_height[sample_id] = height
+                feature.alternate_channel_mz[sample_id] = mz
         result.append(feature)
 
     logger.info("  Aligned features: %d", len(result))
@@ -592,6 +728,10 @@ def run_gap_fill(
     keys = [_feature_id(spot.index) for spot in spots]
     filled = Counter()
     blocked_reuses: list[_NaturalPeakReuseBlock] = []
+    # ``(spot.index, sample_id) -> (height, mz)`` set aside when a cross-channel
+    # re-integration found nothing. Kept out of ``spots`` on purpose: it must not
+    # be mistaken for a cell.
+    alternates: dict[tuple[int, str], tuple[float, float]] = {}
     store_path = Path(context.output_dir) / STORE_NAME
 
     with EicSpillWriter(keys, temp_dir=context.temp_dir) as writer:
@@ -609,7 +749,7 @@ def run_gap_fill(
             writer.add_sample(
                 _one_sample(spots, targets, order, sample_id, source,
                             config, gap_config, natural_ms1, filled,
-                            blocked_reuses),
+                            blocked_reuses, alternates),
             )
             log_memory(logger, f"gap fill {sample_id} spots done")
             source.release()
@@ -629,6 +769,14 @@ def run_gap_fill(
         n = filled[f"kind:{kind}"]
         if n:
             logger.info("    %-8s quantitation ion: %d fills", kind, n)
+    if filled["requantitation_attempted"]:
+        logger.info(
+            "    %d detected cells re-read on the row's consensus ion "
+            "(%d rewritten, %d had no signal there -> no_signal, reading kept "
+            "as alternate_channel_*)",
+            filled["requantitation_attempted"], filled["requantified"],
+            filled["requantitation_no_signal"],
+        )
     if filled["blocked_natural_peak_reuse"]:
         logger.info(
             "    %d MS1 fills rejected: the selected peak is already a natural "
@@ -658,6 +806,12 @@ def run_gap_fill(
         json.dumps(blocked_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if filled["requantitation_cross_channel"]:
+        logger.info(
+            "    %d of those crossed the chromatogram kind entirely "
+            "(an ms2_only cell re-read on the row's MS1 window, or the reverse)",
+            filled["requantitation_cross_channel"],
+        )
     summary: dict[str, object] = dict(filled)
     summary.update({
         "blocked_natural_peak_reuse_audit": str(audit_path),
@@ -665,6 +819,13 @@ def run_gap_fill(
             blocked_blob.encode("utf-8"),
         ).hexdigest(),
         "blocked_natural_peak_reuse_examples": blocked_payload[:20],
+        # JSON-safe, and returned rather than taken as an out-parameter so a
+        # caller that stubs run_gap_fill out (several tests do) needs no
+        # signature change.
+        "alternate_channel_cells": [
+            [int(spot_index), str(sample_id), float(height), float(mz)]
+            for (spot_index, sample_id), (height, mz) in sorted(alternates.items())
+        ],
     })
     return summary
 
@@ -680,6 +841,7 @@ def _one_sample(
     natural_ms1: _NaturalMs1PeakIndex,
     filled: Counter,
     blocked_reuses: list[_NaturalPeakReuseBlock],
+    alternates: dict[tuple[int, str], tuple[float, float]],
 ) -> Iterator[SpotChromatograms]:
     """Fill this sample's holes; yield one :class:`SpotChromatograms` per spot.
 
@@ -735,6 +897,49 @@ def _one_sample(
             filled[f"kind:{target.quant.kind}"] += 1
             if result.status != NO_SIGNAL:
                 filled["forced" if result.forced else "peak_top"] += 1
+        elif needs_requantitation(peak, target, gap_config):
+            # This sample detected the compound, but the picker reported it on a
+            # different ion than the row settled on -- the quantitation ion is a
+            # per-sample argmax and near-ties resolve differently. Read the height
+            # off the row's ion instead, so the numbers in this row are one
+            # measurement. MS-DIAL does the same for GC-MS, where the same thing
+            # happens for the same reason (GcmsGapFiller.NeedsGapFill /
+            # UpdateQuantMass). The cell stays "detected": it was detected.
+            filled["requantitation_attempted"] += 1
+            own = quant_ion(peak, gap_config)
+            if own is not None and own.kind != target.quant.kind:
+                filled["requantitation_cross_channel"] += 1
+            if chromatogram is None:
+                result = GapFillResult(status=NO_SIGNAL)
+            else:
+                result = fill_from_chromatogram(*chromatogram, target, gap_config)
+            requantified = requantify_peak(peak, target, result)
+            if requantified is not peak:
+                filled["requantified"] += 1
+                spot.peaks[sample_id] = peak = requantified
+            else:
+                # Nothing on the row's channel in this sample. Keeping the old
+                # number would leave one cell of the matrix measured on an ion
+                # the rest of the row was not -- across kinds a different
+                # chromatogram entirely, within one kind a different ion of the
+                # same width. Either way it is not the row's measurement, and
+                # nothing in the exported table would say so.
+                #
+                # So the cell reads no_signal and the matrix stays one scale.
+                # The observation is not being denied: the sample keeps its
+                # place in n_detected_evidence, and the reading it gave up is
+                # kept as this row's alternate channel to be looked at. That
+                # pair of outputs is what makes discarding the number safe --
+                # before they existed, keeping it was the lesser evil.
+                filled["requantitation_no_signal"] += 1
+                alternates[(spot.index, sample_id)] = (
+                    float(peak.ms1_height or 0.0),
+                    float(own.mz) if own is not None else 0.0,
+                )
+                spot.peaks[sample_id] = peak = make_filled_peak(
+                    spot.representative, sample_id, target,
+                    GapFillResult(status=NO_SIGNAL),
+                )
         filled[peak.gap_fill_status] += 1
 
         if chromatogram is not None:

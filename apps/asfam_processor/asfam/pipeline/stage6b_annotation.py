@@ -76,9 +76,15 @@ def run_stage6b_annotation(
                     "stage6b", i, len(to_annotate),
                     f"Rep {rep_id}: annotating {i}/{len(to_annotate)}",
                 )
+            # Candidate window by precursor provenance: a measured MS1 precursor
+            # is matched at the MS1 tolerance, an inferred one at a window that
+            # reflects its own error (``annotation_precursor_window_by_source``).
             matches = match_feature_topn(
                 feat, spectra, mz_index, annotation_cfg, similarity_cfg,
                 top_n=TOP_N, csr=csr,
+                precursor_window_da=config.annotation_precursor_window(
+                    getattr(feat, "mz_source", "") or ""
+                ),
             )
             if matches:
                 if reranker is not None:

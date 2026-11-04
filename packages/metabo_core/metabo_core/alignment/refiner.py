@@ -9,7 +9,7 @@ contribute the peaks it alone saw, which is what stopped 34% of them from being
 silently dropped. The price is that one compound whose m/z or RT drifts a little
 between samples can seed two master peaks and come out as two adjacent spots.
 MS-DIAL solves that by returning only the spots that reached ``cSpots`` — the
-rest are gone. ASFAM never deletes a feature (decision D1), so the losers are
+rest are gone. ASFAMProcessor never deletes a feature (decision D1), so the losers are
 marked ``is_duplicate`` with ``duplicate_type = "cross_sample_redundant"``
 instead, and every downstream reader filters on that column.
 
@@ -43,7 +43,7 @@ Four pieces, in order:
 order: the identified ones first, ranked by TotalScore, then everything else by
 mean height. A spot lands within the m/z and RT gate of a slot already taken?
 It is redundant. MS-DIAL runs four such loops (MSP hit, any reference hit,
-TextDB hit, unidentified) — ASFAM has one library, so the first three collapse
+TextDB hit, unidentified) — ASFAMProcessor has one library, so the first three collapse
 into one. One master list **per route**, for the reason above.
 
 *MS1 coverage.* The cross-route pass, over what the first one left visible.
@@ -51,7 +51,7 @@ into one. One master list **per route**, for the reason above.
 *Name deduplication.* One compound reported twice under one name is worse than
 useless. The lower-scoring spot is renamed ``"Putative: <name>"`` — nothing else
 about it changes, not its quantitation and not its ``annotation_matches``.
-MS-DIAL deduplicates by library id, then InChIKey, then name; ASFAM's
+MS-DIAL deduplicates by library id, then InChIKey, then name; ASFAMProcessor's
 ``AnnotationMatch`` carries neither id nor InChIKey, so only the name pass
 survives the port.
 
@@ -82,7 +82,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from metabo_core.algorithms.similarity import cosine_similarity
-from metabo_core.alignment.identity import IdentityState, ms2_identity_evidence
+from metabo_core.alignment.identity import (
+    IdentityObservation,
+    IdentityState,
+    identity,
+    ms2_identity_evidence,
+)
 from metabo_core.alignment.joiner import AlignmentSpot
 from metabo_core.config import RefinerConfig
 from metabo_core.models import MS1, PRODUCT, Feature
@@ -101,7 +106,7 @@ CROSS_SAMPLE_REDUNDANT = "cross_sample_redundant"
 #: :data:`CROSS_SAMPLE_REDUNDANT`: that one says "the union master list emitted
 #: this compound twice", this one says "MS1 saw this compound, so its MS2-only row
 #: is not an MS2-only detection". A reader that cannot tell the two apart cannot
-#: count either — and the second is exactly the row ASFAM's MS2-only claim rests
+#: count either — and the second is exactly the row ASFAMProcessor's MS2-only claim rests
 #: on.
 MS1_COVERED = "ms1_covered"
 MS1_COVERED_PARTIAL = "ms1_covered_partial"
@@ -346,7 +351,7 @@ def mark_cross_sample_redundant(
 ) -> None:
     """Mark, but never drop, the spots that duplicate a better one nearby.
 
-    Placement order is MS-DIAL's, collapsed from four loops to two because ASFAM
+    Placement order is MS-DIAL's, collapsed from four loops to two because ASFAMProcessor
     matches against a single library:
 
     1. identified spots, best TotalScore first (``:32-44``);
@@ -420,6 +425,65 @@ def _ms2_peaks(feature: Feature) -> list:
             for mz, intensity in zip(feature.ms2_mz, feature.ms2_intensity)]
 
 
+def _detected_samples(feature: Feature) -> set:
+    return {
+        sample_id
+        for sample_id, status in feature.gap_fill_status.items()
+        if status == "detected"
+    }
+
+
+def _covered_fully(candidate: Feature, coverer: Feature) -> bool:
+    """Does the MS1 row hold every sample the product row was detected in?
+
+    When it does not, the product row owns a detection nothing else in the table
+    carries, and hiding it would delete evidence rather than deduplicate it.
+    """
+    return _detected_samples(candidate).issubset(_detected_samples(coverer))
+
+
+def _row_observation(
+    feature: Feature, read_spectrum: Callable[[], list],
+) -> IdentityObservation:
+    """Adapt an aligned row to the identity rule's evidence record.
+
+    A row's exact precursor is its quantitation ion and only on the MS1 channel:
+    on a product row ``align_mz`` is a fragment, which is what puts the pair in
+    tier 3 rather than tier 1. Same rule as
+    :func:`~metabo_core.alignment.cluster.observation_of`, one level up — there
+    the unit is one sample's peak, here it is the aligned row.
+    """
+    is_ms1 = feature.quant_route == MS1
+    align_mz = None if feature.align_mz is None else float(feature.align_mz)
+    return IdentityObservation(
+        rt_apex=float(feature.rt),
+        n_fragments=len(read_spectrum()),
+        read_spectrum=read_spectrum,
+        ms1_quant_mz=align_mz if is_ms1 else None,
+        ms2_rep_ion_mz=None if is_ms1 else align_mz,
+        window=(
+            None if feature.alignment_window is None
+            else int(feature.alignment_window)
+        ),
+        window_mz=_row_window_centre(feature),
+        segment=str(feature.alignment_segment or ""),
+    )
+
+
+def _row_window_centre(feature: Feature) -> Optional[float]:
+    """The row's recorded isolation-window centre, if it belongs to its window.
+
+    The representative's stored centre is handed on only when its floor is the
+    row's ``alignment_window``; otherwise the integer window stands, as before.
+    """
+    centre = getattr(feature, "isolation_target_mz", None)
+    if centre is None or feature.alignment_window is None:
+        return None
+    if int(float(centre) // 1.0) != int(feature.alignment_window):
+        return None
+    return float(centre)
+
+
 def mark_ms1_covered(
     features: Iterable[Feature], config: RefinerConfig, stats: RefineStats,
 ) -> None:
@@ -427,7 +491,7 @@ def mark_ms1_covered(
 
     The question is **not** "are these the same peak" — they are not, they are two
     ions of one compound, measured on two chromatograms. It is "has MS1 seen this
-    compound anywhere in the run", because a visible ``ms2_only`` row is ASFAM's
+    compound anywhere in the run", because a visible ``ms2_only`` row is ASFAMProcessor's
     claim that it has *not*, and that claim is what the MS2-only count means.
 
     So: no m/z is compared. A product row is covered when a visible MS1 row sits
@@ -450,6 +514,16 @@ def mark_ms1_covered(
     Only rows still visible take part, on both sides. A hidden row is one no
     reader counts; letting it cover a product row would hide a detection on the
     authority of a row nobody sees, and a hidden product row is already hidden.
+
+    **With** :attr:`RefinerConfig.ms1_covered_identity` (SPEC 2026-08-02 §10.4)
+    the pass shrinks to its residue. Grouping now dispatches on what each side
+    carries, so tier 3 has already answered this exact question — with the
+    isolation window and a chemical anchor on top of the cosine — for every pair
+    it could answer. What is left is what the identity rule called UNJUDGEABLE,
+    and a pair nothing could judge is not grounds for hiding a row: the relation
+    is recorded and ``is_duplicate`` is not touched. Pairs it called SAME or
+    DIFFERENT are left entirely alone, since re-deciding them here on strictly
+    less evidence could only duplicate or contradict the better answer.
     """
     rt_gate = config.rt_gate
     threshold = config.ms2_identity_threshold
@@ -534,17 +608,34 @@ def mark_ms1_covered(
         if best is None:
             continue
         coverer = best[2]
+        if config.ms1_covered_identity is not None:
+            # SPEC 2026-08-02 §10.4. Grouping already asked this pair the same
+            # question with more evidence than RT and a cosine; re-deciding it
+            # here on less would either duplicate tier 3's answer or contradict
+            # it. Only what tier 3 could not judge is left to record.
+            verdict = identity(
+                _row_observation(candidate, lambda: mine),
+                _row_observation(coverer, lambda: spectrum(coverer)),
+                config.ms1_covered_identity,
+            )
+            if verdict.state is not IdentityState.UNJUDGEABLE:
+                continue
+            candidate.alignment_related_feature_id = coverer.feature_id
+            candidate.alignment_relation = (
+                MS1_COVERED if _covered_fully(candidate, coverer)
+                else MS1_COVERED_PARTIAL
+            )
+            if candidate.alignment_relation == MS1_COVERED:
+                stats.n_marked_ms1_covered += 1
+                stats.ms1_covered_pairs.append(
+                    (candidate.feature_id, coverer.feature_id, -best[0]),
+                )
+            else:
+                stats.n_ms1_covered_partial += 1
+            continue
         if config.preserve_cross_route_unique_detections:
             candidate.alignment_related_feature_id = coverer.feature_id
-            product_detected = {
-                sample_id for sample_id, status in candidate.gap_fill_status.items()
-                if status == "detected"
-            }
-            ms1_detected = {
-                sample_id for sample_id, status in coverer.gap_fill_status.items()
-                if status == "detected"
-            }
-            if not product_detected.issubset(ms1_detected):
+            if not _covered_fully(candidate, coverer):
                 candidate.alignment_relation = MS1_COVERED_PARTIAL
                 stats.n_ms1_covered_partial += 1
                 continue

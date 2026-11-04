@@ -287,6 +287,9 @@ def _process_one_file(
                 n_fragments=len(ms2_mz),
                 ms2_sn=ms2_sn,
                 ms2_gaussian=ms2_gaussian,
+                # The window the instrument isolated is centred on the recorded
+                # target; ``precursor`` (the channel) is only its floor.
+                isolation_target_mz=raw_data.isolation_target(precursor),
                 source_file=raw_data.file_path,
             ))
 

@@ -246,6 +246,11 @@ def _process_segment_ms1(
             signal_type="ms1_detected",
             detection_source="ms1_driven",
             mz_source="ms1_peak",
+            # Recorded centre of the window this peak was assigned to; None
+            # when no acquired window covers it (the feature has no MS2).
+            isolation_target_mz=(
+                raw_data.isolation_target(win_key) if win_key is not None else None
+            ),
             source_file=raw_data.file_path,
             ms2_quality=ms2_quality,
             n_correlated_ms2=n_frags,

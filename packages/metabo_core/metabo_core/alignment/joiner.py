@@ -2,7 +2,7 @@
 
 Ported from ``LcmsPeakJoiner.cs`` (master list ``:69-123``, claim ``:140-166``)
 and ``DataObjConverter.cs:183-196`` (per-spot representative), with one
-deliberate departure: the claim score keeps ASFAM's MS2 cosine term.
+deliberate departure: the claim score keeps ASFAMProcessor's MS2 cosine term.
 
 **Peaks are matched on the ion they were quantified on** — ``align_mz``, and
 never ``precursor_mz``. MS-DIAL can align on the precursor because in DDA a
@@ -41,11 +41,23 @@ identity gate: spectra that disagree do not share a box, and the loser founds it
 own master instead of disappearing. Split peaks and duplicates, whose spectra
 agree, are suppressed exactly as before and gap fill recovers their quantitation.
 
-ASFAM explicitly exempts the :data:`MS1` route from that MS2 veto and score:
-its MS1 features carry all-ion spectra for a co-eluting segment, so spectrum
-variation across samples is not molecular identity evidence. PRODUCT keeps the
-gate and isolation-window rule. Shared-core callers retain the identity path by
-default.
+ASFAM historically exempted the :data:`MS1` route from that MS2 veto and score,
+on the grounds that its MS1 features carry all-ion spectra for a whole
+co-eluting segment. **That reading of the data was wrong and is corrected here.**
+Both ASFAM detection paths deconvolve: stage 1 clusters fragment EICs by
+co-elution and gates them on shape correlation, and stage 1b takes an MS1 peak's
+*own* elution curve as the correlation template, so what an MS1-route feature
+carries is a spectrum specific to that peak, not the segment's all-ion trace.
+Nor is the spectrum usually missing — MS1-driven observations with fewer than 3
+fragments are 0.1% / 0.1% / 8.0% of the three benchmarks; sparsity is a
+``ms2_driven`` problem (4.2% / 7.0% / 23.0%) and is far more about the dataset
+than about the path.
+
+What *is* true is that spectra from the two paths differ enough that a cosine
+between them runs 0.82-0.84 median where a same-path pair runs 0.87-0.96. So an
+MS1 cosine is evidence, but only at a low bar: ``use_tiered_identity`` puts the
+veto at 0.2 rather than exempting the route. PRODUCT keeps the gate and
+isolation-window rule. Shared-core callers retain the identity path by default.
 
 Three things this replaces, and why each mattered:
 
@@ -223,6 +235,11 @@ class JoinStats:
     n_promoted_unjudgeable: int = 0
     n_unexplained_lost: int = 0
     reference_sample_id: str = ""
+    #: Which path stopped a peak from founding a master of its own, during the
+    #: build step: ``box`` / ``drift`` / ``identity`` (see :func:`_match_kind`).
+    #: ``drift`` and ``identity`` are rows the run would otherwise have had twice,
+    #: so this is the direct measure of what widening the box bought.
+    n_suppressed_by_path: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +390,10 @@ class _MasterPeak:
     window: int
     sample_id: str
     feature: CandidateFeature
+    #: The m/z segment the seeding peak was acquired in. ASFAM splits one sample
+    #: across many mzML files and the identity path, which drops the m/z key
+    #: entirely, would otherwise let two acquisitions' product ions meet.
+    segment: str = ""
 
 
 class _Spec:
@@ -405,6 +426,51 @@ class _Spec:
 def _uses_ms2_identity(route: str, config: JoinerConfig) -> bool:
     """Return whether this quantitation route has identity-bearing MS2."""
     return route != MS1 or config.use_ms2_identity_for_ms1
+
+
+def _drift_rt_tolerance(config: JoinerConfig) -> float:
+    """The RT half-width of the drift path — never narrower than the box."""
+    return max(float(config.drift_rt_tolerance), float(config.rt_tolerance))
+
+
+def _identity_rt_tolerance(route: str, config: JoinerConfig) -> float:
+    """The RT half-width of the identity path; ``0`` when the route is barred."""
+    if route not in config.identity_match_routes:
+        return 0.0
+    return float(config.identity_rt_tolerance)
+
+
+def _reliably_same(
+    master: _MasterPeak, spec: _Spec, config: JoinerConfig, cache: _Ms2Cache,
+) -> bool:
+    """SAME under the three-state helper — the identity path's only evidence.
+
+    Deliberately stricter than :func:`_same_compound`, which *abstains* toward
+    "keep them in one box" whenever a cosine cannot be computed. Abstention is
+    the right default when geometry has already vouched for the pair; here
+    geometry has said nothing at all, so silence has to mean no.
+    """
+    min_frags = config.ms2_identity_min_fragments
+    if spec.n_fragments < min_frags:
+        return False
+    if int(master.feature.n_fragments or 0) < min_frags:
+        return False
+    master_peaks = cache.peaks(master.sample_id, master.feature)
+    target_peaks = spec.peaks()
+    if not master_peaks or not target_peaks:
+        return False
+    evidence = ms2_identity_evidence(
+        master_peaks,
+        target_peaks,
+        mz_tolerance=config.ms2_mz_tolerance,
+        same_threshold=(
+            config.identity_match_threshold
+            or config.ms2_identity_threshold
+        ),
+        min_fragments=config.ms2_identity_min_fragments,
+        min_matched_fragments=config.ms2_identity_min_matched_fragments,
+    )
+    return evidence.state is IdentityState.SAME
 
 
 def _same_compound(
@@ -480,6 +546,41 @@ def _in_box(master: _MasterPeak, key: _Key, mz_tol: float, rt_tol: float) -> boo
     return abs(master.mz - key.mz) <= mz_tol and abs(master.rt - key.rt) <= rt_tol
 
 
+def _within_claim_reach(
+    master: _MasterPeak,
+    key: _Key,
+    target: CandidateFeature,
+    config: JoinerConfig,
+) -> bool:
+    """Geometry of :func:`_match_kind` without the spectra — could they meet?
+
+    Used where the identity verdict is computed separately and only the *reach*
+    is in question: the conservation pass, which asks whether an unassigned peak
+    is close enough to the peak that took its seat to be judged against it. It
+    has to track every path :func:`_match_kind` grew, or a peak the widened box
+    drew into a master and then denied would be promoted to a master of its own
+    — putting back the row the widening removed.
+    """
+    if master.route != key.route:
+        return False
+    same_window = master.window == key.window
+    if master.route == PRODUCT and not same_window:
+        return False
+    drt = abs(master.rt - key.rt)
+    if (
+        abs(master.mz - key.mz) <= config.mz_tolerance
+        and drt <= _drift_rt_tolerance(config)
+    ):
+        return True
+    identity_rt = _identity_rt_tolerance(key.route, config)
+    if identity_rt <= 0 or drt > identity_rt or not same_window:
+        return False
+    target_segment = str(target.segment_name or "")
+    return not (
+        master.segment and target_segment and master.segment != target_segment
+    )
+
+
 def _matches(
     master: _MasterPeak, key: _Key, spec: _Spec,
     config: JoinerConfig, cache: _Ms2Cache,
@@ -508,10 +609,173 @@ def _matches(
 
     Callers may explicitly make MS1 geometry-only when its spectrum is all-ion
     rather than precursor-selected. PRODUCT remains identity-gated regardless.
+
+    Three paths lead into one box, and a peak needs only one of them:
+
+    ``box``       the historical rule above, and the only one on by default.
+    ``drift``     the same quantitation ion and window, further apart in RT than
+                  ``rt_tolerance`` but within ``drift_rt_tolerance``. The ion is
+                  still the evidence; only the RT window widens.
+    ``identity``  the spectra are reliably SAME, so the quantitation ion — a
+                  per-sample ``argmax`` that resolves near-ties differently in
+                  different samples — is allowed to disagree. Restricted to the
+                  routes named in ``identity_match_routes`` and, for PRODUCT, to
+                  one isolation window and one acquisition segment.
+
+    Widening a box that *suppresses* a peak is only safe because the claim step
+    conserves detections: a peak drawn into a box it then loses is promoted to a
+    master of its own rather than deleted (:func:`_conserving_claim`). Without
+    ``conserve_detected_peaks`` the extra paths only ever move peaks between
+    spots, never out of the run, because they are off by default.
     """
-    if not _in_box(master, key, config.mz_tolerance, config.rt_tolerance):
-        return False
-    return _same_compound(master, spec, config, cache)
+    return _match_kind(master, key, spec, config, cache) is not None
+
+
+def _tiered_same(
+    master: _MasterPeak, spec: _Spec, config: JoinerConfig, cache: _Ms2Cache,
+) -> bool:
+    """SAME under the four-tier rule, in place of *both* gates above.
+
+    ``_same_compound`` is a veto with a low bar and ``_reliably_same`` a permit
+    with a high one, because in the shipped joiner the two sit behind different
+    amounts of geometry. The tiered rule folds them into a single question asked
+    once, dispatched on what the two sides carry rather than on which path
+    reached them — which is what makes it possible, later, to ask it of a pair
+    the route split would never have brought together.
+
+    Two consequences worth stating, because they are the whole measurable effect
+    of turning this on while the joiner's own geometry is unchanged:
+
+    * MS1-route pairs stop being waved through. ``use_ms2_identity_for_ms1``
+      exempted them entirely; tier 1 instead lets a cosine below
+      ``theta_veto`` (0.2) contradict the shared quantitation ion. That costs a
+      spectrum read on MS1 edges the old gate answered for free.
+    * PRODUCT-route pairs are judged at ``theta_same`` (0.7) in the box, not at
+      the box's own ``ms2_identity_threshold`` (0.5). One rule means one number.
+
+    Imported here rather than at module scope: nothing else in this file needs
+    it, and the header is contested by other work in flight.
+    """
+    from metabo_core.alignment.identity import identity as _identity_rule
+
+    return _identity_rule(
+        _observation(master.feature, master.rt, master.window, master.segment,
+                     int(master.feature.n_fragments or 0),
+                     lambda: cache.peaks(master.sample_id, master.feature),
+                     window_mz=_recorded_window_centre(master.feature, master.window)),
+        _observation(spec.peak, float(spec.peak.rt_apex),
+                     int(spec.peak.precursor_mz_nominal),
+                     str(spec.peak.segment_name or ""),
+                     spec.n_fragments, spec.peaks,
+                     window_mz=getattr(spec.peak, "isolation_target_mz", None)),
+        config.identity,
+        # The joiner has already applied its own geometry, and its three RT
+        # paths reach further than IdentityConfig.rt_window. Re-gating here
+        # would silently narrow them while claiming only to change the identity
+        # rule.
+        check_geometry=False,
+    ).is_same
+
+
+def _recorded_window_centre(
+    peak: CandidateFeature, window: int,
+) -> Optional[float]:
+    """The peak's recorded isolation-window centre, if it is ``window``'s.
+
+    A master's window is the aggregate's, not the seeding peak's, so the peak's
+    stored centre is only handed on when its own window is the one asked about.
+    """
+    centre = getattr(peak, "isolation_target_mz", None)
+    if centre is None or int(peak.precursor_mz_nominal) != int(window):
+        return None
+    return float(centre)
+
+
+def _observation(
+    peak: CandidateFeature, rt: float, window: int, segment: str,
+    n_fragments: int, read_spectrum: Callable[[], list],
+    window_mz: Optional[float] = None,
+):
+    """Adapt a peak to the identity rule's evidence record.
+
+    ``rt`` / ``window`` / ``segment`` are passed in because a master's are the
+    aggregate's, not the seeding peak's.
+
+    The exact precursor reported here is ``align_mz`` on the :data:`MS1` route,
+    not ``ms1_quant_mz`` alone. They differ only through ``align_mz``'s
+    documented third-level fallback, which DDA lives on — it never sets
+    ``ms1_quant_mz`` because in DDA the precursor *is* a picked MS1 ion. Tier 1
+    has to re-examine the very ion the box matched on: reading
+    ``ms1_quant_mz`` directly sends such a peak to tier 2, which then has no
+    fragment key to fall back on, and it fails to match the master it founded.
+    """
+    from metabo_core.alignment.identity import (
+        IdentityObservation, lowres_evidence,
+    )
+
+    precursor = peak.ms1_quant_mz
+    if precursor is None and peak.quant_route == MS1:
+        precursor = peak.align_mz
+    lowres_mz, lowres_source = lowres_evidence(peak)
+    return IdentityObservation(
+        rt_apex=float(rt),
+        n_fragments=int(n_fragments),
+        read_spectrum=read_spectrum,
+        ms1_quant_mz=precursor,
+        ms2_rep_ion_mz=peak.ms2_rep_ion_mz,
+        window=int(window),
+        window_mz=window_mz,
+        segment=segment,
+        lowres_mz=lowres_mz,
+        lowres_source=lowres_source,
+    )
+
+
+def _match_kind(
+    master: _MasterPeak, key: _Key, spec: _Spec,
+    config: JoinerConfig, cache: _Ms2Cache,
+) -> Optional[str]:
+    """``"box"`` / ``"drift"`` / ``"identity"``, or ``None`` for no match.
+
+    Named rather than boolean so the join can report *why* each peak landed
+    where it did — the split between "the aligner joined this" and "the picker
+    never found it twice" is the one number that says whether a redundant row
+    count is stage 7's fault or stage 1's.
+    """
+    if master.route != key.route:
+        return None
+    same_window = master.window == key.window
+    if master.route == PRODUCT and not same_window:
+        return None
+
+    tiered = bool(getattr(config, "use_tiered_identity", False))
+    box_same = _tiered_same if tiered else _same_compound
+    permit_same = _tiered_same if tiered else _reliably_same
+
+    dmz = abs(master.mz - key.mz)
+    drt = abs(master.rt - key.rt)
+
+    if dmz <= config.mz_tolerance:
+        if drt <= config.rt_tolerance:
+            if box_same(master, spec, config, cache):
+                return "box"
+        elif drt <= _drift_rt_tolerance(config):
+            if box_same(master, spec, config, cache):
+                return "drift"
+
+    identity_rt = _identity_rt_tolerance(key.route, config)
+    if identity_rt <= 0 or drt > identity_rt:
+        return None
+    # The m/z key is being dropped, so every other coordinate has to hold: one
+    # isolation window, and one acquisition segment when both peaks name one.
+    if not same_window:
+        return None
+    target_segment = str(getattr(spec.peak, "segment_name", "") or "")
+    if master.segment and target_segment and master.segment != target_segment:
+        return None
+    if permit_same(master, spec, config, cache):
+        return "identity"
+    return None
 
 
 def select_reference_sample(
@@ -539,6 +803,105 @@ def select_reference_sample(
     return max(sample_ids, key=lambda s: reference_replicate_quality(features_by_sample[s]))
 
 
+class _MasterIndex:
+    """Two views of the master list, one per way a peak can reach a master.
+
+    ``by_mz`` buckets on ``align_mz`` at ``2 * mz_tolerance`` and is scanned
+    ``+/-1`` bucket, so it covers at least ``+/-mz_tolerance`` around any peak
+    wherever in its bucket it sits. It serves the ``box`` and ``drift`` paths,
+    which both keep the m/z key.
+
+    ``by_window`` buckets on ``(route, window, RT)`` and serves the ``identity``
+    path, which drops the m/z key and so cannot be found through the first view
+    at all. It is only built when some route enables that path — an unused index
+    over 50k masters is not free.
+
+    Both views exist so the build step and the claim step can ask the same
+    question. If they diverged, a peak could be suppressed from founding a
+    master by a box it is then unable to claim, and it would vanish from the run.
+    """
+
+    def __init__(self, config: JoinerConfig) -> None:
+        self._config = config
+        self.peaks: list[_MasterPeak] = []
+        self._mz_width = 2.0 * config.mz_tolerance if config.mz_tolerance > 0 else 1.0
+        self._by_mz: dict[int, list[int]] = {}
+        self._identity_rt = max(
+            (float(config.identity_rt_tolerance)
+             if config.identity_match_routes else 0.0),
+            0.0,
+        )
+        self._rt_width = self._identity_rt * 2.0 if self._identity_rt > 0 else 0.0
+        self._by_window: dict[tuple, list[int]] = {}
+
+    def add(self, peak: CandidateFeature, key: _Key, sample_id: str) -> int:
+        return self.append(_MasterPeak(
+            key.mz, key.rt, key.route, key.window, sample_id, peak,
+            str(peak.segment_name or ""),
+        ))
+
+    def append(self, master: _MasterPeak) -> int:
+        index = len(self.peaks)
+        self.peaks.append(master)
+        self._by_mz.setdefault(int(master.mz // self._mz_width), []).append(index)
+        if (
+            self._rt_width > 0
+            and master.route in self._config.identity_match_routes
+        ):
+            self._by_window.setdefault(
+                (master.route, master.window, int(master.rt // self._rt_width)), [],
+            ).append(index)
+        return index
+
+    def candidates(self, key: _Key) -> list[int]:
+        """Every master this peak could possibly match, by either view."""
+        bucket = int(key.mz // self._mz_width)
+        found = [
+            i
+            for k in (bucket - 1, bucket, bucket + 1)
+            for i in self._by_mz.get(k, ())
+        ]
+        if self._rt_width <= 0 or key.route not in self._config.identity_match_routes:
+            return found
+        rt_bucket = int(key.rt // self._rt_width)
+        seen = set(found)
+        for rb in (rt_bucket - 1, rt_bucket, rt_bucket + 1):
+            for i in self._by_window.get((key.route, key.window, rb), ()):
+                if i not in seen:
+                    seen.add(i)
+                    found.append(i)
+        return found
+
+    def matching(
+        self, key: _Key, spec: _Spec, cache: _Ms2Cache,
+    ) -> list[tuple[int, str]]:
+        """``(master index, which path matched)`` for every master that matches.
+
+        Ordered by ``(m/z, RT, index)``, which is the order the claim step used
+        when it walked an m/z-sorted array. The greedy claim keeps the earlier
+        master on a tie, so the enumeration order is part of its result and must
+        not change just because the candidates now come from two indexes.
+        """
+        candidates = sorted(
+            self.candidates(key),
+            key=lambda i: (self.peaks[i].mz, self.peaks[i].rt, i),
+        )
+        out = []
+        for i in candidates:
+            kind = _match_kind(self.peaks[i], key, spec, self._config, cache)
+            if kind is not None:
+                out.append((i, kind))
+        return out
+
+
+def _index_over(master: list[_MasterPeak], config: JoinerConfig) -> _MasterIndex:
+    """Re-index a finished master list so the claim asks the build's question."""
+    index = _MasterIndex(config)
+    for peak in master:
+        index.append(peak)
+    return index
+
+
 def _build_master_list(
     features_by_sample: dict[str, list[CandidateFeature]],
     reference_id: str,
@@ -546,39 +909,27 @@ def _build_master_list(
     stats: JoinStats,
     cache: _Ms2Cache,
 ) -> list[_MasterPeak]:
-    """Reference peaks seed the buckets; every other sample adds its unmatched.
+    """Reference peaks seed the index; every other sample adds its unmatched.
 
-    The bucket width is ``2 * mz_tolerance`` and we scan ``+/-1`` bucket, so the
-    search covers at least ``+/-mz_tolerance`` around any peak regardless of
-    where in its bucket it sits. Buckets are cut on ``align_mz``, the same key
-    :func:`_matches` compares — bucketing on one m/z and testing another would
-    hide pairs from each other.
-
-    "Unmatched" is :func:`_matches` and nothing else — the same box, MS2 gate
-    included, that the claim step will use. It used to be a scoreless arithmetic
-    test (MS-DIAL's ``LcmsPeakJoiner.cs:51-53``), which is why the ``cache``
-    argument is new: a peak suppressed here must be a peak that can be claimed
-    there, so this step now has to be able to read MS2 too. Scoring still
+    "Unmatched" is :func:`_match_kind` and nothing else — the same box, MS2 gate
+    and extra paths that the claim step will use. It used to be a scoreless
+    arithmetic test (MS-DIAL's ``LcmsPeakJoiner.cs:51-53``), which is why the
+    ``cache`` argument is here: a peak suppressed here must be a peak that can be
+    claimed there, so this step has to be able to read MS2 too. Scoring still
     belongs to the claim step alone.
     """
-    width = 2.0 * config.mz_tolerance if config.mz_tolerance > 0 else 1.0
-
-    master: list[_MasterPeak] = []
-    buckets: dict[int, list[int]] = {}
+    index = _MasterIndex(config)
+    master = index.peaks
 
     def add(peak: CandidateFeature, key: _Key, sample_id: str) -> None:
-        buckets.setdefault(int(key.mz // width), []).append(len(master))
-        master.append(_MasterPeak(
-            key.mz, key.rt, key.route, key.window, sample_id, peak,
-        ))
+        index.add(peak, key, sample_id)
 
-    def already_covered(key: _Key, spec: _Spec) -> bool:
-        b = int(key.mz // width)
-        return any(
-            _matches(master[i], key, spec, config, cache)
-            for k in (b - 1, b, b + 1)
-            for i in buckets.get(k, ())
-        )
+    def already_covered(key: _Key, spec: _Spec) -> Optional[str]:
+        for i in index.candidates(key):
+            kind = _match_kind(master[i], key, spec, config, cache)
+            if kind is not None:
+                return kind
+        return None
 
     reference_peaks = features_by_sample[reference_id]
     if config.conserve_detected_peaks:
@@ -605,7 +956,11 @@ def _build_master_list(
             if key is None:
                 stats.n_unkeyed_peaks += 1
                 continue
-            if already_covered(key, _Spec(cache, sample_id, peak)):
+            kind = already_covered(key, _Spec(cache, sample_id, peak))
+            if kind is not None:
+                stats.n_suppressed_by_path[kind] = (
+                    stats.n_suppressed_by_path.get(kind, 0) + 1
+                )
                 continue
             add(peak, key, sample_id)
             added += 1
@@ -696,12 +1051,10 @@ def _claim(
     not re-offered; MS-DIAL does the same, and gap fill recovers the
     quantitation.
     """
-    # Sorted by (mz, rt); only the m/z axis is searched, the rest of the box is
-    # _matches' job. The rt tiebreak keeps the candidate order deterministic.
-    order = np.lexsort(([m.rt for m in master], [m.mz for m in master]))
-    sorted_mz = np.asarray([master[i].mz for i in order], dtype=np.float64)
-
-    mz_tol, rt_tol = config.mz_tolerance, config.rt_tolerance
+    # The same index the build step used, rebuilt over the finished master list:
+    # the two steps have to enumerate the same candidates or a peak suppressed
+    # there is unclaimable here.
+    index = _index_over(master, config)
     assignments: list[dict[str, CandidateFeature]] = [{} for _ in master]
 
     for sample_id in sorted(features_by_sample):
@@ -713,16 +1066,11 @@ def _claim(
             key = _key_of(peak)
             if key is None:
                 continue                   # already counted by _build_master_list
-            # searchsorted bounds the m/z axis; the route, the isolation window,
-            # RT and the MS2 gate are gates, not weights, so they are applied
-            # here rather than discounted in the score.
-            lo = int(np.searchsorted(sorted_mz, key.mz - mz_tol, side="left"))
-            hi = int(np.searchsorted(sorted_mz, key.mz + mz_tol, side="right"))
+            # The index bounds the search; the route, the isolation window, RT
+            # and the MS2 gate are gates, not weights, so they are applied here
+            # rather than discounted in the score.
             spec = _Spec(cache, sample_id, peak)
-            candidates = [
-                i for i in (int(order[k]) for k in range(lo, hi))
-                if _matches(master[i], key, spec, config, cache)
-            ]
+            candidates = [i for i, _kind in index.matching(key, spec, cache)]
             if not candidates:
                 continue
 
@@ -791,9 +1139,7 @@ def _claim_deterministic(
     re-offered to its next choice.  This removes both the one-way greedy loss and
     any dependence on the order candidates happened to be stored in ``.mfeat``.
     """
-    order = np.lexsort(([m.rt for m in master], [m.mz for m in master]))
-    sorted_mz = np.asarray([master[i].mz for i in order], dtype=np.float64)
-    mz_tol = config.mz_tolerance
+    index = _index_over(master, config)
     assignments: list[dict[str, CandidateFeature]] = [{} for _ in master]
 
     master_tie_key = {
@@ -828,13 +1174,8 @@ def _claim_deterministic(
             key = _key_of(peak)
             if key is None:
                 continue
-            lo = int(np.searchsorted(sorted_mz, key.mz - mz_tol, side="left"))
-            hi = int(np.searchsorted(sorted_mz, key.mz + mz_tol, side="right"))
             spec = _Spec(cache, sample_id, peak)
-            candidates = [
-                i for i in (int(order[k]) for k in range(lo, hi))
-                if _matches(master[i], key, spec, config, cache)
-            ]
+            candidates = [i for i, _kind in index.matching(key, spec, cache)]
             stats.n_candidate_edges += len(candidates)
 
             use_ms2 = _uses_ms2_identity(key.route, config)
@@ -963,10 +1304,10 @@ def _conserving_claim(
             for sample_id, peak in peaks.items()
         }
 
-        width = 2.0 * config.mz_tolerance if config.mz_tolerance > 0 else 1.0
-        buckets: dict[int, list[int]] = {}
-        for i, mp in enumerate(master):
-            buckets.setdefault(int(mp.mz // width), []).append(i)
+        # Same index the build and claim steps use, so a peak the widened box
+        # drew into a master and then denied is judged against the winner that
+        # denied it — not promoted to a master of its own for want of a lookup.
+        index = _index_over(master, config)
 
         promotions: list[tuple[str, CandidateFeature, _Key, IdentityState]] = []
         candidate_folds: dict[int, list[FoldedPeak]] = {}
@@ -978,35 +1319,31 @@ def _conserving_claim(
                 continue
             key = _key_of(peak)
             assert key is not None
-            bucket = int(key.mz // width)
             nearby: list[tuple[int, CandidateFeature, IdentityEvidence]] = []
-            for k in (bucket - 1, bucket, bucket + 1):
-                for master_idx in buckets.get(k, ()):
-                    winner = holder_of.get((master_idx, sample_id))
-                    if winner is None:
-                        continue
-                    winner_key = _key_of(winner)
-                    if winner_key is None:
-                        continue
-                    winner_as_master = _MasterPeak(
-                        winner_key.mz,
-                        winner_key.rt,
-                        winner_key.route,
-                        winner_key.window,
-                        sample_id,
-                        winner,
-                    )
-                    if not _in_box(
-                        winner_as_master,
-                        key,
-                        config.mz_tolerance,
-                        config.rt_tolerance,
-                    ):
-                        continue
-                    evidence = _identity_between_peaks(
-                        peak, winner, sample_id, config, cache,
-                    )
-                    nearby.append((master_idx, winner, evidence))
+            for master_idx in index.candidates(key):
+                winner = holder_of.get((master_idx, sample_id))
+                if winner is None:
+                    continue
+                winner_key = _key_of(winner)
+                if winner_key is None:
+                    continue
+                winner_as_master = _MasterPeak(
+                    winner_key.mz,
+                    winner_key.rt,
+                    winner_key.route,
+                    winner_key.window,
+                    sample_id,
+                    winner,
+                    str(winner.segment_name or ""),
+                )
+                if not _within_claim_reach(
+                    winner_as_master, key, peak, config,
+                ):
+                    continue
+                evidence = _identity_between_peaks(
+                    peak, winner, sample_id, config, cache,
+                )
+                nearby.append((master_idx, winner, evidence))
 
             same = [item for item in nearby
                     if item[2].state is IdentityState.SAME]
@@ -1246,6 +1583,15 @@ def _pick_representative(peaks: dict[str, CandidateFeature]) -> str:
     raise AssertionError("representative not found among the spot's peaks")
 
 
+#: Public name for the above. Callers outside this package have to re-pick the
+#: representative after gap filling — MS-DIAL does the same, in
+#: ``SetRepresentativeProperties`` after the fill (``PeakAligner.cs:113-115``) —
+#: and they should not have to reach for a private name to do it. The private
+#: name stays: this module's own callers use it, and so do other in-flight
+#: branches.
+pick_representative = _pick_representative
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1335,6 +1681,16 @@ def _log_stats(stats: JoinStats) -> None:
     for sample_id, (matched, unmatched) in sorted(stats.matched_by_sample.items()):
         logger.info(
             "    %s: %d matched, %d unmatched", sample_id, matched, unmatched,
+        )
+    extra = {
+        kind: n for kind, n in stats.n_suppressed_by_path.items()
+        if kind != "box"
+    }
+    if extra:
+        logger.info(
+            "  Rows the widened box saved: %s (peaks that would each have "
+            "founded a row of their own)",
+            ", ".join(f"{kind}={n}" for kind, n in sorted(extra.items())),
         )
     if stats.n_lost_peaks and stats.n_input_keyed_peaks:
         logger.info(
@@ -1491,6 +1847,10 @@ def build_feature(
         detection_source=rep.detection_source,
         mz_source=rep.mz_source,
         mz_confidence=rep.mz_confidence,
+        inferred_mz=getattr(rep, "inferred_mz", None),
+        ms1_window_mz=getattr(rep, "ms1_window_mz", None),
+        isolation_target_mz=getattr(rep, "isolation_target_mz", None),
+        nl_n_support=getattr(rep, "nl_n_support", None),
         is_duplicate=rep.is_duplicate,
         duplicate_group_id=rep.duplicate_group_id,
         duplicate_type=rep.duplicate_type,

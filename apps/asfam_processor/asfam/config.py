@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Literal
 
+from metabo_core.models import PRODUCT
 from metabo_core.config import (
     SmoothingConfig,
     PeakDetectionConfig,
@@ -13,7 +14,9 @@ from metabo_core.config import (
     AnnotationConfig,
     ConfidenceConfig,
     AlignmentConfig,
+    ClusterConfig,
     GapFillConfig,
+    IdentityConfig,
     JoinerConfig,
     RefinerConfig,
     lc_ms1_peak_config,
@@ -54,6 +57,11 @@ class ProcessingConfig:
     n_workers: int = 4                 # multiprocessing pool size
 
     # -- Stage 1: MS2 peak detection --
+    # Ablation switch (2026-10 revision; Reviewer 2's "MS1-driven only"
+    # baseline): False skips stage 1 entirely, so only the MS1-driven branch
+    # (stage 1b) feeds stages 2+ and every ``detection_source`` reads
+    # ``ms1_driven``. Production runs leave it True.
+    enable_ms2_driven_branch: bool = True
     eic_mz_tolerance: float = 0.02     # Da, product ion EIC extraction
     eic_smoothing_method: str = "savgol"
     eic_smoothing_window: int = 7      # Savitzky-Golay window length (legacy; new peak detector uses MS-DIAL LWMA internally)
@@ -104,6 +112,18 @@ class ProcessingConfig:
     # -- Stage 2: MS1 assignment --
     ms1_mz_tolerance: float = 0.01     # Da
     ms1_rt_tolerance: float = 0.05      # min (3s, tighter to prevent cross-assignment)
+    # Which m/z an MS1-detected, MS2-driven feature *reports* as its precursor
+    # (v1.4.2610xx). "base_peak" (default): the tallest MS1 ion inside the 1-Da
+    # isolation window at the MS1 peak apex — the ion the feature was quantified
+    # on (``ms1_quant_mz``), a real measured ion. "window_centroid": the
+    # intensity-weighted centroid of the whole window at that apex (the
+    # pre-v1.4 behaviour). Measured on the validation set, the centroid sits more
+    # than 0.01 Da from the quantified ion for 48 % of these features (p95 0.16
+    # Da) because it mixes every co-isolated ion, so a library-match window
+    # of 0.01 Da is only meaningful with "base_peak". The centroid is kept on
+    # ``ms1_window_mz`` in both modes. MS1-driven features are unaffected (their
+    # precursor is already the ROI centroid of one ion).
+    ms1_precursor_report: str = "base_peak"
     # MS1-driven detection amplitude floor — a per-stage override of
     # ``ms1_peak.min_amplitude``（stage1b mass-slice 抽峰用；Stage 2 的
     # MS1 指派/晋升门 ``stage2_ms1_assignment`` 也复用本字段）。
@@ -124,7 +144,7 @@ class ProcessingConfig:
     #   - 故定 300：在保住总数 > 1436 的前提下尽量收紧弱尾噪声。
     #   注：这是钝化处理（同时丢掉部分真·弱峰）。彻底解法是"噪声感知门"
     #   （raw-EIC S/N + 连续背景 grass 拒绝器，保留真弱峰、只杀背景通道），
-    #   属算法层改造，见 内部验证记录 §6.4
+    #   属算法层改造，见 docs/validation/2026-06-24-msdial-vs-builtin.md §6.4
     #   的升级建议（PR-C 后续）。
     ms1_min_height: float = 500.0  # MS-DIAL-parity floor: MS-DIAL's ASFAM export keeps Height>=500. Lowered from Phase-4 "floor1000" on 2026-06-26 by user decision — the full-range recall check (docs/validation/2026-06-26-recall-vs-msdial.md) found 55.6% of un-recalled MS-DIAL peaks sit in the 500–1000 band that floor1000 excluded (raw recall 78.7% vs 87.1% at floor parity), almost all at low m/z; 500 recovers that weak low-m/z tail to match MS-DIAL. Trade-off: re-admits some low-amplitude features (the <300 "grass" audit above still argues against going below ~300; 500 stays clear of it). NOTE: not yet re-validated on a fresh floor500 run — val_260626 was floor1000.
     # Stage 1b MS2 product-ion deconvolution (问题 B, MS-DIAL DIA MSDec-aligned).
@@ -132,8 +152,15 @@ class ProcessingConfig:
     #
     # 问题 B 改写（2026-06-26）：旧版用 per-ion 色谱相关性硬门（Pearson≥0.70，
     # 更早是 0.90）做主判别器，把大量"真实但窄/带噪"的产品离子滤掉 →
-    # ms1_driven feature 常 n_frags=0 (ms2_quality="none") → 无法谱注释（打分
-    # 低的下游主因）。核对 MS-DIAL C# 源码（MsdialCore/MSDec/MSDecHandler.cs,
+    # ms1_driven feature 谱过稀 (ms2_quality="none"/"sparse") → 无法谱注释（打分
+    # 低的下游主因）。
+    # ⚠ 2026-08-02 实测更正：本注释原写"ms1_driven feature 常 n_frags=0"，
+    # 这个"常"字在三个基准上都不成立——现行默认参数下 ms1_driven 观测里
+    # n_fragments<3 的只占 0.1%（技术重复）/ 0.1%（水稻）/ 8.0%（癌症）。
+    # 谱稀疏主要出在 ms2_driven 那一侧（4.2% / 7.0% / 23.0%），且更多是数据集
+    # 属性（癌症中位 6 根碎片 vs 水稻 15 根）而非检测路径属性。
+    # 上面那句描述的是**改写前**的状态，不是现状。
+    # 核对 MS-DIAL C# 源码（MsdialCore/MSDec/MSDecHandler.cs,
     # MSDecProcess.cs）：MS-DIAL 的 MS2 反卷积**根本不用 per-ion 相关性**，其
     # 真正的结构判据是 precursor↔product 的 **apex 时间对齐（≤2 scan）**，叠加
     # 模型峰最小二乘分离重叠（本档不移植后者）。故档 B 把判别器从"相关性"换成
@@ -189,7 +216,17 @@ class ProcessingConfig:
     ms1_shape_weight: float = 0.3      # weight for peak shape in MS1 assignment scoring
 
     # -- Stage 2.5: MS2-only m/z inference --
+    # Order of evidence for an MS2-only precursor (v1.4.2610xx restores the
+    # design order): detected MS1 peak (stage 2) -> neutral-loss consensus ->
+    # isolation-window centroid stored by stage 2 -> integer channel.
     min_fragments_for_inference: int = 3
+    # Fragment-poor MS2-only features (fewer than ``min_fragments_for_inference``
+    # fragments) cannot be given a neutral-loss precursor. True keeps them: they
+    # take the window-centroid fallback (or stay on the integer channel), remain
+    # in every table and export as ``ms2_only_tier="D"`` so downstream statistics
+    # can set them aside without the pipeline deleting anything. False restores
+    # the pre-v1.4 deletion (``status="discarded_few_fragments"``).
+    retain_fragment_poor_ms2_only: bool = True
     enable_library_mz_inference: bool = False   # Library-matching step for ms2_only features.
                                                 # Very slow and typically assigns only a handful of
                                                 # features, so OFF by default. Neutral-loss consensus
@@ -238,6 +275,35 @@ class ProcessingConfig:
     # unaffected).
     matchms_min_wdp: float = 0.10
     matchms_use_rt: bool = False                # use RT in scoring (user toggle)
+    # Library-match precursor candidate window (Da), chosen per feature from its
+    # ``mz_source``: a reference spectrum is a candidate only when
+    # |reference precursor - feature precursor| <= window (metabo_core's
+    # ``match_feature_topn``; the precursor is not a scored term). A measured MS1
+    # precursor gets the MS1 assignment tolerance; the neutral-loss consensus
+    # precursor a window matching its inference error; the isolation-window
+    # centroid a window from its measured error distribution; a feature with no
+    # precursor estimate (reported m/z = integer channel) keeps the historical
+    # +/-0.5 Da. Sources absent from the map use the "" entry. Setting every value
+    # to 0.5 reproduces the pre-v1.4 candidate set exactly. Calibration on the
+    # validation data set (rep 3, 7,469 MS1-detected MS2-driven features,
+    # 2026-10): the window centroid lies within 0.177 Da of the quantified ion
+    # for 95 % of features (median 0.010, p90 0.086), hence 0.18 for ms1_lowres —
+    # an optimistic bound, since MS2-only features sit lower in their window
+    # mixture than MS1-detected ones. ms1_peak at 0.01 presumes
+    # ``ms1_precursor_report="base_peak"``. nl_consensus = 0.05 from the
+    # annotation-outcome analysis (S2.1e, 5,180 masked MS1-detected features
+    # matched with their inferred precursor): 0.05 / 0.1 / 0.5 Da kept 84 / 86 /
+    # 92 % of the correct top-1 hits with no wrong-formula hit at any window, but
+    # every widening added more unconfirmable new hits than correct ones it
+    # recovered (0.05→0.1: +4 correct / +17 unconfirmable; 0.1→0.5: +9 / +15).
+    # Revisit if the inference changes.
+    annotation_precursor_window_by_source: dict = field(default_factory=lambda: {
+        "ms1_peak": 0.01,
+        "ms1_relaxed": 0.01,
+        "nl_consensus": 0.05,
+        "ms1_lowres": 0.18,
+        "": 0.5,
+    })
 
     # -- Stage 3: Segment merge --
     merge_rt_tolerance: float = 0.05   # min
@@ -296,6 +362,21 @@ class ProcessingConfig:
     isf_rt_tolerance: float = 0.035
     isf_ms2_mz_tolerance: float = 0.02  # Da
 
+    # -- Stage 7: Intra-sample convergence (Step 0, runs before the join) --
+    # Fold the two views one sample has of a single integrated MS1 peak into one
+    # candidate, so maximum-cardinality assignment cannot seat them in two
+    # neighbouring masters. Measured effect of turning it off: +0.6% (techrep) /
+    # +0.9% (rice) / +2.7% (cancer) rows. Stage 7 only -- keep both fields in
+    # spill._FINGERPRINT_EXCLUDED or every _work/ checkpoint is voided.
+    intra_sample_collapse_enabled: bool = True
+    # Also draw edges *within* a detection path (ms1_driven x ms1_driven,
+    # ms2_driven x ms2_driven). The evidence there is only ever
+    # ``same_source_exact`` -- bit-identical integration bounds and height from
+    # one raw file -- because ``dual_path`` is false by construction. That branch
+    # of _ms1_natural_peak_evidence existed but was structurally unreachable:
+    # the candidate generation drew edges only between the two paths.
+    intra_sample_collapse_same_path: bool = True
+
     # -- Stage 7: Cross-replicate alignment --
     # Peaks are matched on the ion they were quantified on (CandidateFeature.
     # align_mz), never on the precursor -- ASFAM fragments everything, so the
@@ -349,6 +430,103 @@ class ProcessingConfig:
     # whether an MS1 row already covers a product row. Same instrument,
     # different questions, and they were tuned on different evidence.
     alignment_ms1_covered_threshold: float = 0.7
+    # RT half-width of the drift path: same quantitation ion, same window, but
+    # further apart in RT than alignment_rt_tolerance. 0 disables it.
+    #
+    # alignment_rt_tolerance was set from the drift of pairs that already
+    # matched, and a pair pushed out of the window by drift is absent from that
+    # measurement by construction. Measured instead on the peaks that founded a
+    # master rather than matching one: 23% (rice) / 30% (cancer) are within
+    # alignment_mz_tolerance of an existing master and outside its RT window,
+    # and MS2 calls 67% / 77% of those the same compound. Stage 7 only -- keep in
+    # spill._FINGERPRINT_EXCLUDED.
+    alignment_drift_rt_tolerance: float = 0.5  # min
+    # RT half-width of the identity path: the spectra agree, so the quantitation
+    # ion is allowed to disagree. 0 disables it.
+    #
+    # Both quantitation ions are a per-sample argmax -- ms2_rep_ion_mz is the
+    # tallest fragment, ms1_quant_mz the tallest MS1 centroid in the isolation
+    # window at the apex cycle -- so a near-tie resolves differently in another
+    # sample and one compound keys on two ions. On three technical replicates of
+    # one sample, 18.4% of all newly founded masters sit at the same RT in the
+    # same window, MS2-identical to an existing master, keyed on a different ion;
+    # 57% of those more than 0.5 Da away, i.e. a wholly different ion. MS-DIAL
+    # answers the same problem in GC-MS by matching on RT + whole spectrum and
+    # never on a representative ion (GcmsPeakJoiner.IsSimilarTo).
+    alignment_identity_rt_tolerance: float = 0.5  # min
+    # Only the PRODUCT route takes the identity path. An ASFAM MS1 feature
+    # carries the all-ion spectrum of its whole co-eluting segment, so two
+    # different compounds in one isolation window have near-identical spectra --
+    # enabling it there would merge a compound with its own isotope.
+    alignment_identity_routes: tuple[str, ...] = (PRODUCT,)
+    # -- Stage 7: which grouping engine builds the rows --
+    # "clustered" — one pass: candidate generation with NO m/z in the key, then
+    #   complete-link clustering under the four-tier identity rule. A cluster may
+    #   hold several observations of one sample; "one cell per sample" becomes a
+    #   quantitation constraint instead of a grouping one.
+    # "legacy"    — the union master list + bucketed greedy claim + conservation
+    #   loop + a second reconciliation pass. Route-partitioned, so an
+    #   ms1_detected observation and an ms2_only one can never share a row.
+    #
+    # This is the rollback point for the whole architecture change, and it only
+    # reads stage 7 — flipping it never re-runs stages 0-6.5.
+    alignment_engine: Literal["clustered", "legacy"] = "clustered"
+    # RT bucket width of the clustered engine's candidate index, in minutes.
+    # Must be >= identity_rt_window_cross or tier-3 candidates are dropped before
+    # the identity rule is ever asked (ClusterConfig enforces it).
+    cluster_rt_bucket: float = 0.5
+    # Let one sample put several observations in one row (they are resolved down
+    # to one cell afterwards). Turning this off reinstates "one peak per sample
+    # per row" as a *grouping* constraint, which is the thing the one-pass design
+    # exists to remove -- but it is also the single biggest driver of the row
+    # count, so it is worth being able to A/B.
+    cluster_allow_intra_sample_merge: bool = True
+    # Keep an isotope satellite out of its own monoisotopic peak's row. Isotope
+    # partners share nearly every fragment, so tiers 2 and 3 -- which never
+    # compare exact masses -- cannot separate them, and +1.003 Da can fall in the
+    # adjacent isolation window, so the window gate does not do it either.
+    cluster_respect_isotope_role: bool = True
+
+    # -- Stage 7: four-tier identity rule (SPEC 2026-08-02 §6) --
+    # Replaces the joiner's box veto AND its identity-path permit with one
+    # question, dispatched on what the two observations carry rather than on
+    # which chromatogram they were quantified from. Every field below is stage 7
+    # only -- all of them must stay in spill._FINGERPRINT_EXCLUDED.
+    #
+    # False restores the previous gates byte-for-byte; it is the rollback point.
+    tiered_identity_enabled: bool = True
+    # Tier 1 (both sides carry an exact precursor): the cosine below which the
+    # spectra are allowed to contradict a shared quantitation ion. A veto, so the
+    # bar is low. 0.35 was measured to split more known-same-name pairs than
+    # known-different-name ones on the cancer benchmark (109 vs 97).
+    identity_theta_veto: float = 0.2
+    # Tier 2 (neither side has a precursor): the spectra are the whole case, so
+    # this is a permit. Deliberately the same number as
+    # alignment_ms1_covered_threshold -- two passes scoring one pair of spectra
+    # must not disagree about what they say.
+    identity_theta_same: float = 0.7
+    # Tier 3 (one side has a precursor, the other only fragments). THE knob to
+    # sweep: 0.8 is a starting point, not a conclusion. Measured on proxy labels,
+    # 0.7 / 0.8 / 0.9 recall 0.61 / 0.53 / 0.41 of same-name pairs on rice while
+    # merging 0.108 / 0.081 / 0.050 of different-name ones.
+    identity_theta_cross: float = 0.8
+    # Tier 3 relaxed, when the fragment-only side's isolation-window centroid
+    # corroborates the other side's precursor within identity_lowres_tol.
+    identity_theta_cross_supported: float = 0.7
+    # RT half-widths. Tier 3 is wider on purpose: a fragment chromatogram and its
+    # precursor's peak 0.33-0.40 min apart for one compound, so 0.3 there costs
+    # 10-13 points of same-name coverage where it costs 3-6 on tiers 1/2.
+    identity_rt_window: float = 0.3
+    identity_rt_window_cross: float = 0.5
+    # Isolation-window edge slack (Da) for tier 3's containment test.
+    identity_eps_win: float = 0.2
+    # Tier 3's chemical anchor: the fragment side's quantitation ion must reach
+    # this fraction of the precursor side's base peak in its spectrum.
+    identity_anchor_rel: float = 0.10
+    # Window-centroid corroboration distance (Da). NEVER 0.02: the centroid is an
+    # intensity-weighted mixture and reports a co-isolated ion whenever the
+    # compound of interest is not the dominant contributor.
+    identity_lowres_tol: float = 0.3
     gap_fill_enabled: bool = True
     gap_fill_rt_expansion: float = 1.5
     # Fragment chromatograms stored per spot in alignment.eic, taken from the
@@ -509,7 +687,23 @@ class ProcessingConfig:
             min_matched_pct=self.matchms_min_matched_pct,
             min_wdp=self.matchms_min_wdp,
             use_rt=self.matchms_use_rt,
+            # The window for a feature whose precursor source is not in the
+            # per-source map; stage 6.5 passes the per-feature window itself.
+            precursor_window_da=self.annotation_precursor_window(""),
         )
+
+    def annotation_precursor_window(self, mz_source: str) -> float:
+        """Library-match precursor window (Da) for a feature's ``mz_source``.
+
+        Looks the source up in ``annotation_precursor_window_by_source``; an
+        unknown source falls back to the ``""`` entry, and a map without that
+        entry to the historical 0.5 Da.
+        """
+        windows = self.annotation_precursor_window_by_source or {}
+        key = mz_source or ""
+        if key in windows:
+            return float(windows[key])
+        return float(windows.get("", 0.5))
 
     def reranker_view(self) -> "RerankerConfig":
         from metabo_core.config.reranker import RerankerConfig
@@ -570,7 +764,56 @@ class ProcessingConfig:
             # cross-sample variation cannot veto an MS1 chromatographic peak.
             # PRODUCT spectra remain identity-gated in the shared joiner.
             use_ms2_identity_for_ms1=False,
+            # The two extra ways into a box. Both are correctness fixes for a key
+            # that does not mean the same thing twice, not tuning knobs -- see the
+            # field comments on alignment_{drift,identity}_rt_tolerance.
+            drift_rt_tolerance=self.alignment_drift_rt_tolerance,
+            identity_rt_tolerance=self.alignment_identity_rt_tolerance,
+            identity_match_routes=tuple(self.alignment_identity_routes),
+            # The same cosine the redundancy pass uses when it makes this exact
+            # call on this exact pair. The box's own veto stays at the looser
+            # alignment_ms2_identity_threshold: a veto and a permit are not the
+            # same question.
+            identity_match_threshold=self.alignment_ms1_covered_threshold,
             reference_sample=self.alignment_reference_sample,
+            # One identity question instead of two gates with different bars.
+            use_tiered_identity=bool(self.tiered_identity_enabled),
+            identity=self.identity_view(),
+        )
+
+    def cluster_view(self) -> ClusterConfig:
+        """Candidate generation + complete-link clustering."""
+        return ClusterConfig(
+            identity=self.identity_view(),
+            rt_bucket=self.cluster_rt_bucket,
+            ms2_cache_size=JoinerConfig.ms2_cache_size,
+            respect_isotope_role=bool(self.cluster_respect_isotope_role),
+            allow_intra_sample_merge=bool(self.cluster_allow_intra_sample_merge),
+        )
+
+    def identity_view(self) -> IdentityConfig:
+        """Thresholds of the four-tier identity rule.
+
+        Kept as a view rather than a nested config field so the GUI and CLI go on
+        seeing one flat parameter surface, and so a saved project written before
+        the rule existed still loads.
+        """
+        return IdentityConfig(
+            theta_veto=self.identity_theta_veto,
+            theta_same=self.identity_theta_same,
+            theta_cross=self.identity_theta_cross,
+            theta_cross_supported=self.identity_theta_cross_supported,
+            rt_window=self.identity_rt_window,
+            rt_window_cross=self.identity_rt_window_cross,
+            eps_win=self.identity_eps_win,
+            anchor_rel=self.identity_anchor_rel,
+            lowres_tol=self.identity_lowres_tol,
+            mz_tolerance=self.alignment_mz_tolerance,
+            ms2_mz_tolerance=self.eic_mz_tolerance,
+            n_min=max(3, int(self.alignment_ms2_identity_min_fragments)),
+            m_min=max(
+                3, int(self.alignment_ms2_identity_min_matched_fragments),
+            ),
         )
 
     def gap_fill_view(self) -> GapFillConfig:
@@ -620,6 +863,23 @@ class ProcessingConfig:
             require_product_window_match=True,
             require_cross_route_window_match=True,
             preserve_cross_route_unique_detections=True,
+            # Reach far enough to undo a split the joiner made. Without this the
+            # pass gates on 0.02 Da AND 0.05 min while the joiner splits at
+            # >0.02 Da OR >0.2 min — two regions that never intersect, so no
+            # joiner-made split was reachable. PRODUCT only, and only alongside
+            # the reliable MS2 SAME decision _spots_are_mergeable already makes.
+            merge_rt_tolerance=self.alignment_identity_rt_tolerance,
+            merge_identity_routes=tuple(self.alignment_identity_routes),
+            # SPEC 2026-08-02 §10.4. Only the clustered engine groups by
+            # evidence, so only there has tier 3 already answered this pass's
+            # question; the legacy engine still needs it to mark duplicates.
+            # Keyed off the engine rather than a knob of its own so that
+            # ``alignment_engine="legacy"`` remains one switch back to the whole
+            # of the old behaviour.
+            ms1_covered_identity=(
+                self.identity_view()
+                if str(self.alignment_engine) == "clustered" else None
+            ),
         )
 
     def confidence_view(self) -> ConfidenceConfig:

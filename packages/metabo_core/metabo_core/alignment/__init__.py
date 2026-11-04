@@ -1,8 +1,5 @@
 """Cross-replicate alignment algorithms shared across apps."""
-from metabo_core.alignment.replicates import (
-    align_features_across_replicates,
-    reference_replicate_quality,
-)
+from metabo_core.alignment.replicates import reference_replicate_quality
 from metabo_core.alignment.gap_filler import (
     GapFillResult,
     GapFillTarget,
@@ -43,7 +40,6 @@ from metabo_core.alignment.refiner import (
 )
 
 __all__ = [
-    "align_features_across_replicates",
     "reference_replicate_quality",
     "AlignmentSpot",
     "FoldedPeak",

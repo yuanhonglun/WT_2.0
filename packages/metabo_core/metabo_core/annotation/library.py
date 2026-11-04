@@ -569,6 +569,7 @@ def match_feature_topn(
     similarity: SimilarityConfig,
     top_n: Optional[int] = None,
     csr: Optional[dict] = None,
+    precursor_window_da: Optional[float] = None,
 ) -> list[AnnotationMatch]:
     """Match one feature against an indexed library and return top-N hits.
 
@@ -576,6 +577,14 @@ def match_feature_topn(
     is what makes the batch screen cheap; when it is omitted the three buckets
     this feature touches are flattened on the fly, through the same code, so the
     result is identical either way.
+
+    ``precursor_window_da`` is the S1 candidate window (Da) around the feature's
+    precursor; ``None`` means :attr:`AnnotationConfig.precursor_window_da`
+    (0.5, the historical value). Callers that know how good a feature's
+    precursor is pass a window to match — ASFAM uses the MS1 assignment
+    tolerance for a measured MS1 precursor and wider windows for inferred ones.
+    The window must not exceed 1.0 Da: candidates come from the three integer
+    buckets around the precursor, so a wider window would be silently clipped.
 
     Screening order (each stage is result-preserving, so the order is free, but
     they are ordered cheapest-first): S1 precursor window → S2' batch Matched%
@@ -602,6 +611,8 @@ def match_feature_topn(
     min_peaks = annotation.min_peaks_to_match
     min_matched_pct = annotation.min_matched_pct
     min_wdp = annotation.min_wdp
+    window = (float(precursor_window_da) if precursor_window_da is not None
+              else float(getattr(annotation, "precursor_window_da", 0.5)))
 
     # Per-feature precompute, amortized across all candidates:
     #  * float64 query arrays reused by the array-based matcher (S3) so the
@@ -649,9 +660,10 @@ def match_feature_topn(
         bucket = (csr[key] if csr is not None
                   else _build_bucket_csr(spectra, mz_index[key]))
 
-        # S1: precursor candidate window, tightened from ±1.0 to ±0.5 Da.
+        # S1: precursor candidate window (``precursor_window_da``; 0.5 Da by
+        # default, the value that was hard-coded here until v1.4.2610xx).
         keep = bucket["n_peaks"] >= min_peaks
-        np.logical_and(keep, np.abs(bucket["ref_pmz"] - feat_mz) <= 0.5, out=keep)
+        np.logical_and(keep, np.abs(bucket["ref_pmz"] - feat_mz) <= window, out=keep)
 
         # S2': batch Matched% upper bound. This is the screen that makes a
         # 3.35M-spectrum library tractable — it kills, in a few vectorised

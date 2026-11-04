@@ -39,6 +39,7 @@ def run_stage2(
         n_high = 0
         n_low = 0
         n_low_with_ms1 = 0
+        n_window = 0
 
         # Group features by (segment_name, channel) for batch processing
         channel_groups: dict[tuple[str, int], list[int]] = defaultdict(list)
@@ -66,6 +67,15 @@ def run_stage2(
                 continue
 
             cache_key = (seg_name, channel)
+
+            # Every feature of this window learns the window's recorded centre
+            # (the m/z the instrument actually isolated around; the integer
+            # channel is only its floor). Stage 2.5 and alignment, which never
+            # see raw data, read the window from this field.
+            target = raw_data.isolation_target(channel)
+            for fi in feat_indices:
+                if getattr(features[fi], "isolation_target_mz", None) is None:
+                    features[fi].isolation_target_mz = target
 
             # Detect MS1 peaks (strict)
             if cache_key not in ms1_cache:
@@ -114,10 +124,18 @@ def run_stage2(
                                         break
                             n_high += 1
                             continue
-                    # 问题 C 兜底: strict + relaxed 都没拿到检测 MS1 峰时, 取
-                    # 隔离窗 ±0.5 Da 在 apex cycle 的 MS1 质心补一个低分辨 m/z,
-                    # 避免 precursor_mz 退回整数通道 (ASFAM 每周期都有 MS1)。
-                    _assign_lowres_ms1_fallback(features[fi], raw_data, config)
+                    # Isolation-window centroid: the +/-0.5 Da MS1 centroid at
+                    # the apex cycle is only *stored* here (``ms1_window_mz``),
+                    # because stage 2 is the last stage that holds raw data.
+                    # Stage 2.5 tries neutral-loss consensus first and falls
+                    # back to this value last (``mz_source="ms1_lowres"``).
+                    # Writing it straight into ``ms1_precursor_mz`` here, as the
+                    # 2026-06-25 fallback did, pre-empted stage 2.5 for nearly
+                    # every MS2-only feature (its entry filter is "no source
+                    # yet"). The centroid is also kept on relaxed-assigned
+                    # features purely as a cross-check column.
+                    if _store_window_centroid(features[fi], raw_data):
+                        n_window += 1
                     _assign_representative_ion(features[fi])
                     n_low += 1
 
@@ -126,9 +144,10 @@ def run_stage2(
                               f"Rep {rep_id}: done")
 
         logger.info(
-            "  Replicate %s: %d ms1_detected, %d ms2_only (%d with MS1 m/z); "
+            "  Replicate %s: %d ms1_detected, %d ms2_only (%d relaxed-assigned, "
+            "%d window centroid stored for stage 2.5); "
             "%d ms1_driven passthrough (already precise)",
-            rep_id, n_high, n_low, n_low_with_ms1, n_skipped,
+            rep_id, n_high, n_low, n_low_with_ms1, n_window, n_skipped,
         )
 
     return features_by_replicate
@@ -183,20 +202,25 @@ def _batch_assign_ms1(
 
         feat = features[fi]
         peak = ms1_peaks[pi]
-        precursor = feat.precursor_mz_nominal
+        # The window the instrument isolated is centred on the recorded
+        # target, not on the integer channel (its floor) -- see
+        # RawSegmentData.isolation_target. Same window as the chromatogram
+        # the peak was picked on (_detect_ms1_peaks).
+        centre = raw_data.isolation_target(feat.precursor_mz_nominal)
+        feat.isolation_target_mz = centre
 
         precise_mz = extract_ms1_precise_mz(
-            raw_data, peak.apex_index,
-            float(precursor) - 0.5, float(precursor) + 0.5,
+            raw_data, peak.apex_index, centre - 0.5, centre + 0.5,
         )
         if precise_mz is None:
             continue
 
-        feat.ms1_precursor_mz = precise_mz
-        feat.ms1_quant_mz = _basepeak_mz(
-            raw_data, peak.apex_index,
-            float(precursor) - 0.5, float(precursor) + 0.5,
+        base_mz = _basepeak_mz(
+            raw_data, peak.apex_index, centre - 0.5, centre + 0.5,
         )
+        feat.ms1_quant_mz = base_mz
+        feat.ms1_window_mz = precise_mz          # whole-window centroid, cross-check column
+        feat.ms1_precursor_mz = _reported_precursor(precise_mz, base_mz, config)
         feat.ms1_height = peak.height
         feat.ms1_area = peak.area
         feat.ms1_sn = peak.sn_ratio
@@ -204,7 +228,7 @@ def _batch_assign_ms1(
         feat.signal_type = "ms1_detected"
         feat.mz_source = "ms1_peak"
         feat.ms1_isotopes = _extract_isotope_pattern(
-            raw_data, peak.apex_index, precise_mz, config,
+            raw_data, peak.apex_index, feat.ms1_precursor_mz, config,
         )
 
         assigned_features.add(fi)
@@ -225,7 +249,7 @@ def _detect_ms1_peaks(
 ) -> list:
     """Extract MS1 EIC and detect peaks for one channel. Called once per channel."""
     rt_ms1, int_ms1 = extract_ms1_eic(
-        raw_data, float(precursor_nominal), mz_tolerance=0.5,
+        raw_data, raw_data.isolation_target(precursor_nominal), mz_tolerance=0.5,
     )
     if len(int_ms1) == 0 or np.max(int_ms1) < config.ms1_min_height:
         return []
@@ -252,8 +276,11 @@ def _basepeak_mz(
 ) -> Optional[float]:
     """m/z of the tallest MS1 centroid in ``[mz_low, mz_high]`` at one cycle.
 
-    ``_detect_ms1_peaks`` quantifies on ``extract_ms1_eic(raw, channel, 0.5)``,
-    whose value at each cycle is exactly this centroid's intensity. So this is
+    ``_detect_ms1_peaks`` quantifies on ``extract_ms1_eic(raw, target, 0.5)``
+    with ``target = raw.isolation_target(channel)``, whose value at each cycle
+    is exactly this centroid's intensity -- provided both are handed the same
+    window, so callers centre both on the recorded target, never on the bare
+    integer channel. So this is
     the ion the feature's ``ms1_height`` was measured on, and the one gap
     filling must integrate to produce a comparable number. Its sibling
     ``extract_ms1_precise_mz`` returns the intensity-weighted centroid of the
@@ -308,7 +335,7 @@ def _detect_ms1_peaks_relaxed(
 ) -> list:
     """Detect MS1 peaks with relaxed parameters for weak-signal assignment."""
     rt_ms1, int_ms1 = extract_ms1_eic(
-        raw_data, float(precursor_nominal), mz_tolerance=0.5,
+        raw_data, raw_data.isolation_target(precursor_nominal), mz_tolerance=0.5,
     )
     if len(int_ms1) == 0 or np.max(int_ms1) < 50:
         return []
@@ -356,15 +383,16 @@ def _try_relaxed_ms1_assign(
     if best_peak is None:
         return False
 
+    centre = raw_data.isolation_target(feature.precursor_mz_nominal)
+    feature.isolation_target_mz = centre
     precise_mz = extract_ms1_precise_mz(
-        raw_data, best_peak.apex_index,
-        float(feature.precursor_mz_nominal) - 0.5,
-        float(feature.precursor_mz_nominal) + 0.5,
+        raw_data, best_peak.apex_index, centre - 0.5, centre + 0.5,
     )
     if precise_mz is None:
         return False
 
-    # Assign precise m/z
+    # Assign precise m/z (window centroid at the relaxed peak's apex; the
+    # promoted branch below may replace it with the quantified ion).
     feature.ms1_precursor_mz = precise_mz
 
     # If the MS1 peak is strong enough, promote to ms1_detected. The
@@ -373,17 +401,18 @@ def _try_relaxed_ms1_assign(
     if best_peak.height >= config.ms1_min_height:
         feature.signal_type = "ms1_detected"
         feature.mz_source = "ms1_peak"
-        feature.ms1_quant_mz = _basepeak_mz(
-            raw_data, best_peak.apex_index,
-            float(feature.precursor_mz_nominal) - 0.5,
-            float(feature.precursor_mz_nominal) + 0.5,
+        base_mz = _basepeak_mz(
+            raw_data, best_peak.apex_index, centre - 0.5, centre + 0.5,
         )
+        feature.ms1_quant_mz = base_mz
+        feature.ms1_window_mz = precise_mz
+        feature.ms1_precursor_mz = _reported_precursor(precise_mz, base_mz, config)
         feature.ms1_height = best_peak.height
         feature.ms1_area = best_peak.area
         feature.ms1_sn = best_peak.sn_ratio
         feature.ms1_gaussian = best_peak.gaussian_similarity
         feature.ms1_isotopes = _extract_isotope_pattern(
-            raw_data, best_peak.apex_index, precise_mz, config,
+            raw_data, best_peak.apex_index, feature.ms1_precursor_mz, config,
         )
     else:
         feature.mz_source = "ms1_relaxed"
@@ -391,43 +420,74 @@ def _try_relaxed_ms1_assign(
     return True
 
 
-def _assign_lowres_ms1_fallback(
+def _reported_precursor(
+    window_centroid: float,
+    base_peak: Optional[float],
+    config: ProcessingConfig,
+) -> float:
+    """The m/z an MS1-detected, MS2-driven feature reports as its precursor.
+
+    ``config.ms1_precursor_report`` decides: ``"base_peak"`` (default since
+    v1.4.2610xx) reports the tallest ion in the isolation window at the MS1 peak
+    apex — the ion the feature was quantified on, a real measured m/z —
+    ``"window_centroid"`` reports the intensity-weighted centroid of the whole
+    1-Da window (pre-v1.4 behaviour; a mixture of every co-isolated ion). Falls
+    back to the centroid when no base peak could be read.
+    """
+    mode = str(getattr(config, "ms1_precursor_report", "base_peak") or "base_peak")
+    if mode == "window_centroid" or base_peak is None:
+        return float(window_centroid)
+    if mode != "base_peak":
+        raise ValueError(
+            f"ms1_precursor_report must be 'base_peak' or 'window_centroid', got {mode!r}"
+        )
+    return float(base_peak)
+
+
+def window_centroid_mz(
     feature: CandidateFeature,
     raw_data: RawSegmentData,
-    config: ProcessingConfig,
-) -> bool:
-    """给没拿到检测 MS1 峰的 ms2_only feature 补一个低分辨精确 m/z。
+) -> Optional[float]:
+    """Intensity-weighted MS1 centroid of the 1-Da isolation window (centred on
+    the recorded isolation target, not on the integer channel) at the feature's
+    apex cycle, or ``None`` when the window holds no MS1 signal.
 
-    ASFAM 采集模式保证每个周期都有一张全分辨 MS1, 所以即便该通道 MS1 太弱、
-    strict(``ms1_min_height``)+relaxed(50) 都抽不出峰, 隔离窗 ±0.5 Da 内在
-    feature apex cycle 处通常仍有 MS1 信号。取其强度加权质心作低分辨 m/z
-    (``mz_source='ms1_lowres'`` / ``mz_confidence='low'``), 避免 ``precursor_mz``
-    退回整数通道。``signal_type`` 保持 ms2_only —— 这是窗质心, 不是检测峰。
+    ASFAM acquires a full-resolution MS1 scan every cycle, so even when the
+    channel's MS1 is too weak for the strict (``ms1_min_height``) and relaxed
+    (50) peak pickers, the window usually still carries signal at the apex.
+    The value is a *mixture* centroid of everything co-isolated in the 1-Da
+    window — a low-resolution precursor estimate, not a detected peak — and
+    that is why it is the last fallback in stage 2.5 and is reported with
+    ``mz_confidence="low"``.
 
-    仅在 ``ms1_precursor_mz`` 尚未赋值时生效; 窗内确无信号 (质心 None) 时不动,
-    保持原整数通道行为。
-
-    Returns
-    -------
-    bool
-        True 表示成功补了低分辨 m/z。
+    Public so the manuscript's precision analyses can call the production
+    algorithm on MS1-detected features (whose strict peak m/z is the truth).
     """
-    if feature.ms1_precursor_mz is not None:
-        return False
     rt_array = raw_data.rt_array
     if rt_array is None or len(rt_array) == 0:
-        return False
+        return None
     apex_cycle = int(np.argmin(np.abs(rt_array - feature.rt_apex)))
-    channel = feature.precursor_mz_nominal
-    precise_mz = extract_ms1_precise_mz(
-        raw_data, apex_cycle,
-        float(channel) - 0.5, float(channel) + 0.5,
+    centre = raw_data.isolation_target(feature.precursor_mz_nominal)
+    return extract_ms1_precise_mz(
+        raw_data, apex_cycle, centre - 0.5, centre + 0.5,
     )
-    if precise_mz is None:
+
+
+def _store_window_centroid(
+    feature: CandidateFeature,
+    raw_data: RawSegmentData,
+) -> bool:
+    """Store the window centroid on ``feature.ms1_window_mz`` and nothing else.
+
+    Deliberately leaves ``ms1_precursor_mz`` / ``mz_source`` / ``mz_confidence``
+    untouched: whether the centroid becomes the reported precursor is stage
+    2.5's decision, taken only after neutral-loss consensus has failed or was
+    not applicable (``run_stage2b``). Returns True when a centroid was stored.
+    """
+    mz = window_centroid_mz(feature, raw_data)
+    if mz is None:
         return False
-    feature.ms1_precursor_mz = precise_mz
-    feature.mz_source = "ms1_lowres"
-    feature.mz_confidence = "low"
+    feature.ms1_window_mz = float(mz)
     return True
 
 

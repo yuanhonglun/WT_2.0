@@ -32,6 +32,50 @@ from metabo_core.annotation import is_high_confidence
 logger = logging.getLogger(__name__)
 
 
+def window_delta_mda(feature) -> Optional[float]:
+    """Reported precursor minus the stored isolation-window centroid, in mDa.
+
+    Filled only when both estimates exist *and* differ in origin: on an
+    ``ms1_lowres`` row the reported precursor *is* the centroid, so the value
+    would be 0 by construction and is left blank rather than read as perfect
+    agreement. On a neutral-loss row this is the independent cross-check the
+    manuscript's precision analysis is built on.
+    """
+    window = getattr(feature, "ms1_window_mz", None)
+    if window is None or (feature.mz_source or "") == "ms1_lowres":
+        return None
+    return (float(feature.precursor_mz) - float(window)) * 1000.0
+
+
+def ms2_only_tier(feature, min_fragments: int = 3) -> str:
+    """Evidence tier of an MS2-only row's precursor; ``""`` on MS1-detected rows.
+
+    ``A``  >= ``min_fragments`` fragments and a detected MS1 peak
+           (``mz_source`` ms1_peak / ms1_relaxed);
+    ``B``  >= ``min_fragments`` fragments and a neutral-loss consensus precursor
+           supported by >= 2 fragments (``mz_confidence`` high / medium);
+    ``C``  >= ``min_fragments`` fragments and a weaker precursor: a 1-vote
+           consensus, the isolation-window centroid, a library-inferred value,
+           or none at all;
+    ``D``  fewer than ``min_fragments`` fragments — retained in the table,
+           never evaluated (no neutral-loss inference is possible).
+
+    Downstream statistics count MS2-only features of tiers A-C and report D
+    separately. The tier is derived at export, so it is always consistent with
+    the ``mz_source`` / ``mz_confidence`` / ``n_fragments`` columns beside it.
+    """
+    if feature.signal_type != "ms2_only":
+        return ""
+    if int(feature.n_fragments or 0) < int(min_fragments):
+        return "D"
+    source = feature.mz_source or ""
+    if source in ("ms1_peak", "ms1_relaxed"):
+        return "A"
+    if source == "nl_consensus" and (feature.mz_confidence or "") in ("high", "medium"):
+        return "B"
+    return "C"
+
+
 def run_stage8(
     features: list[Feature],
     output_dir: str,
@@ -166,8 +210,32 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         row["rt_right"] = round(f.rt_right, 3)
         row["signal_type"] = f.signal_type
         # PR-E: detection provenance (ms1_driven / ms2_driven / both) — consumed
-        # by the MS-DIAL comparison tool's net-add metric (features only this pipeline finds).
+        # by the MS-DIAL comparison tool's "ASFAMProcessor net-add" (net-add) metric.
         row["detection_source"] = f.detection_source
+        # Precursor provenance (2026-10 revision, Reviewer 4): where the reported
+        # m/z came from and how confident that path is, the neutral-loss value
+        # and its supporting-fragment count, the stored isolation-window
+        # centroid, the distance between the two estimates, and the MS2-only
+        # evidence tier downstream statistics filter on.
+        row["mz_source"] = f.mz_source or ""
+        row["mz_confidence"] = f.mz_confidence or ""
+        row["inferred_mz"] = (
+            round(f.inferred_mz, 5) if f.inferred_mz is not None else ""
+        )
+        row["nl_n_support"] = (
+            int(f.nl_n_support) if f.nl_n_support is not None else ""
+        )
+        row["ms1_window_mz"] = (
+            round(f.ms1_window_mz, 5) if f.ms1_window_mz is not None else ""
+        )
+        # Centre of the acquired 1-Da isolation window (the integer channel is
+        # its floor); the reported precursor of an MS2-driven feature lies
+        # within +/- 0.5 Da of it.
+        target = getattr(f, "isolation_target_mz", None)
+        row["isolation_target_mz"] = round(target, 4) if target is not None else ""
+        delta = window_delta_mda(f)
+        row["window_delta_mda"] = round(delta, 2) if delta is not None else ""
+        row["ms2_only_tier"] = ms2_only_tier(f, config.min_fragments_for_inference)
         row["mean_height"] = round(f.mean_height, 1)
         row["mean_area"] = round(f.mean_area, 1)
         row["cv"] = round(f.cv, 3)
@@ -178,6 +246,21 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
         # filled, or filled with nothing.
         row["n_detected"] = int(f.n_detected)
         row["detection_rate"] = round(f.detection_rate, 3)
+        # ms1 / product — which kind of chromatogram every number in this row
+        # was read off. A row may be *grouped* from both kinds of observation,
+        # but it is quantified on one, and the two scales are not comparable.
+        row["quant_channel"] = f.quant_channel
+        # n_detected counts samples detected ON THIS ROW'S CHANNEL; this counts
+        # samples detected on ANY channel. They differ where a sample saw the
+        # compound only through its fragments and nothing was integrable at the
+        # row's MS1 ion — the cell then reads no_signal, but the observation was
+        # real. mean_height / cv / sn_ratio / n_detected are unaffected: they
+        # still count only gap_fill_status == "detected".
+        row["n_detected_evidence"] = int(f.n_detected_evidence)
+        row["detection_rate_evidence"] = round(f.detection_rate_evidence, 3)
+        # Which tier of the identity rule admitted a member to this row
+        # (1 both sides had an exact precursor / 2 neither / 3 exactly one).
+        row["identity_tier"] = int(f.identity_tier)
         row["gaussian_similarity"] = round(f.gaussian_similarity, 3)
         # MS-DIAL 对齐的分项列（便于与 MS-DIAL 导出列逐项对比）。
         # composite_score == total_score（都 = AnnotationMatch.score）；composite_score
@@ -205,6 +288,18 @@ def _export_csv(features: list[Feature], path: Path, config: ProcessingConfig) -
             # 填充值分开的列。mean_height / cv / sn_ratio / n_detected 只数
             # detected，height_rep{i} 三种都收。
             row[f"gap_fill_status_rep{rep_id}"] = f.gap_fill_status.get(rep_id, "")
+            # Non-empty only where re-integrating this sample on the row's
+            # channel found nothing: the reading that was set aside, and the ion
+            # it came off. Never part of the quantitation matrix — that has to
+            # stay one scale — but kept so the discarded number is inspectable.
+            row[f"alternate_channel_height_rep{rep_id}"] = (
+                round(f.alternate_channel_height[rep_id], 1)
+                if rep_id in f.alternate_channel_height else ""
+            )
+            row[f"alternate_channel_mz_rep{rep_id}"] = (
+                round(f.alternate_channel_mz[rep_id], 5)
+                if rep_id in f.alternate_channel_mz else ""
+            )
 
         rows.append(row)
 
@@ -261,7 +356,7 @@ def _export_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("=" * 60 + "\n")
-        f.write("ASFAM Processing Report\n")
+        f.write("ASFAM Processor Processing Report\n")
         f.write("=" * 60 + "\n\n")
         for stage, stats in sorted(stage_stats.items()):
             f.write(f"--- {stage} ---\n")

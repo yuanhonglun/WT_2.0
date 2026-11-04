@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -12,10 +13,28 @@ from asfam.pipeline.orchestrator import PipelineOrchestrator
 from metabo_gui.logging_setup import quiet_noisy_libraries
 
 
+def apply_override(config: ProcessingConfig, item: str) -> None:
+    """Apply one ``FIELD=JSON`` override in place.
+
+    Flat scalar fields only — the nested configs have their own surfaces. An
+    unknown field is a hard error rather than a no-op: a typo in a threshold
+    sweep would otherwise silently re-run the default and be read as a result.
+    """
+    field, separator, raw = item.partition("=")
+    field = field.strip()
+    if not separator or field not in ProcessingConfig.__dataclass_fields__:
+        raise SystemExit(f"--set: no such config field: {item!r}")
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    setattr(config, field, value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="asfam",
-        description="ASFAM Processor mode: All-ion Stepwise Fragmentation Acquisition LC-QTOF data processor",
+        description="ASFAM Processor: All-ion Stepwise Fragmentation Acquisition LC-QTOF data processor",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
@@ -43,6 +62,14 @@ def main() -> None:
         help="Number of parallel workers (default: 4)",
     )
     parser.add_argument(
+        "--set", action="append", metavar="FIELD=JSON", default=[],
+        help=(
+            "Override one flat config field, after --config. Repeatable. The "
+            "value is parsed as JSON, so: --set identity_theta_cross=0.9 "
+            "--set tiered_identity_enabled=false"
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="Enable verbose logging",
     )
@@ -66,6 +93,8 @@ def main() -> None:
 
     config.ionization_mode = args.mode
     config.n_workers = args.workers
+    for override in args.set:
+        apply_override(config, override)
 
     # Validate inputs
     mzml_paths = []

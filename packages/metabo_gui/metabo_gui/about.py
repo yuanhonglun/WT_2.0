@@ -1,4 +1,4 @@
-"""Standard About dialog factory used across all apps in this project.
+"""Standard About dialog factory used across all ASFAMProcessor apps.
 
 The author / institution / license / email block is built into the
 default text so each app only has to supply its own short description.
@@ -33,7 +33,7 @@ def show_about_dialog(
     Parameters
     ----------
     app_name : str
-        Display name (e.g. "ASFAM Processor").
+        Display name (e.g. "ASFAM Processor", "ASFAMProcessor — GC-MS").
     version : str
         Release version string (typically ``metabo_core.__version__``).
     description : str

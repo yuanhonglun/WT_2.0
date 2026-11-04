@@ -25,7 +25,7 @@ def detect_chrom_peaks(rt_array, intensity_array, *, config, **detect_kwargs):
     (gaussian_threshold / sn_fold / min_prominence_ratio / rt_window_*) are
     ignored by the msdial branch.
 
-    The builtin branch forwards ALL kwargs to ``detect_peaks`` unchanged, so the builtin
+    The builtin branch forwards ALL kwargs to ``detect_peaks`` unchanged, so builtin
     output is byte-for-byte identical to calling ``detect_peaks`` directly.
     """
     if config.peak_detector == "msdial":

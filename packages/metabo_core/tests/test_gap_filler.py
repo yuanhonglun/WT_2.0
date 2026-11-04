@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from metabo_core.alignment.gap_filler import (
+    DETECTED,
     FILLED,
     MS1,
     NO_SIGNAL,
@@ -19,9 +20,12 @@ from metabo_core.alignment.gap_filler import (
     _search_right_edge,
     fill_from_chromatogram,
     fill_spot,
+    consensus_quant_ion,
     gap_fill_target,
     make_filled_peak,
+    needs_requantitation,
     quant_ion,
+    requantify_peak,
 )
 from metabo_core.alignment.joiner import AlignmentSpot, build_feature
 from metabo_core.models import CandidateFeature
@@ -360,3 +364,209 @@ def test_fill_spot_only_touches_the_missing_samples():
     assert results["s3"].status == NO_SIGNAL       # provider had no chromatogram
     assert spot.peaks["s1"].gap_fill_status == "detected"
     assert set(spot.peaks) == {"s1", "s2", "s3"}
+
+
+# ---------------------------------------------------------------------------
+# One quantitation ion per row (GcmsPeakJoiner.ResetQuantMasses)
+# ---------------------------------------------------------------------------
+
+def _product(fid: str, rep_ion: float, height: float,
+             spectrum: list[tuple[float, float]]) -> CandidateFeature:
+    return _feature(
+        feature_id=fid,
+        signal_type="ms2_only",
+        ms1_quant_mz=None,
+        ms2_rep_ion_mz=rep_ion,
+        ms1_height=height,
+        ms2_mz=np.array([p[0] for p in spectrum]),
+        ms2_intensity=np.array([p[1] for p in spectrum]),
+        n_fragments=len(spectrum),
+    )
+
+
+SPECTRUM = [(85.03, 100.0), (150.07, 99.0), (203.11, 40.0)]
+
+
+def test_consensus_quant_ion_takes_the_vote_not_the_tallest_cell():
+    """Two cells key on 85.03, one on 150.07 — and the odd one out is tallest.
+
+    The quantitation ion is a per-sample argmax over near-ties, so letting the
+    loudest single cell name the ion lets one sample's coin-flip decide what the
+    whole row is measured on. MS-DIAL votes instead (``GcmsPeakJoiner.cs:99-104``).
+    """
+    detected = [
+        _product("a", 85.03, 1000.0, SPECTRUM),
+        _product("b", 85.03, 900.0, SPECTRUM),
+        _product("c", 150.07, 5000.0, SPECTRUM),
+    ]
+    ion = consensus_quant_ion(detected, detected[0], CFG)
+    assert ion is not None
+    assert ion.kind == PRODUCT
+    assert ion.mz == pytest.approx(85.03)
+
+
+def test_consensus_quant_ion_ignores_cells_below_a_tenth_of_the_row():
+    """``ResetQuantMasses`` only counts cells at >=10% of the row's tallest."""
+    detected = [
+        _product("loud", 150.07, 10000.0, SPECTRUM),
+        _product("faint1", 85.03, 100.0, SPECTRUM),
+        _product("faint2", 85.03, 90.0, SPECTRUM),
+    ]
+    ion = consensus_quant_ion(detected, detected[0], CFG)
+    assert ion.mz == pytest.approx(150.07)
+
+
+def test_consensus_quant_ion_rejects_a_mass_the_representative_does_not_carry():
+    """``QuantMassExists``: the chosen ion must be in the representative's spectrum.
+
+    Falls back to the representative's own ion rather than integrating a slice
+    the representative has no signal in.
+    """
+    representative = _product("rep", 150.07, 900.0, SPECTRUM)
+    detected = [
+        _product("a", 999.99, 1000.0, [(999.99, 100.0), (500.0, 50.0), (7.0, 5.0)]),
+        _product("b", 999.99, 950.0, [(999.99, 100.0), (500.0, 50.0), (7.0, 5.0)]),
+        representative,
+    ]
+    ion = consensus_quant_ion(detected, representative, CFG)
+    assert ion.mz == pytest.approx(150.07)
+
+
+def test_needs_requantitation_flags_a_detected_cell_on_the_wrong_ion():
+    """``GcmsGapFiller.NeedsGapFill`` is ``peak.Mass != spot.QuantMass``.
+
+    It applies to naturally detected cells, not only to holes: a row whose cells
+    were measured on two different fragments has a meaningless CV.
+    """
+    target = GapFillTarget(
+        quant=QuantIon(mz=85.03, kind=PRODUCT, tolerance=0.1, channel=110),
+        rt_center=5.0, rt_lo=4.5, rt_hi=5.5, peak_width=0.2,
+        estimated_noise=10.0,
+    )
+    on_ion = _product("a", 85.03, 1000.0, SPECTRUM)
+    off_ion = _product("b", 150.07, 1000.0, SPECTRUM)
+    assert not needs_requantitation(on_ion, target, CFG)
+    assert needs_requantitation(off_ion, target, CFG)
+
+    filled = _product("c", 150.07, 1000.0, SPECTRUM)
+    filled.gap_fill_status = FILLED
+    assert not needs_requantitation(filled, target, CFG), "holes are filled, not re-read"
+
+
+def test_requantify_keeps_the_cell_detected_and_moves_only_the_numbers():
+    """MS-DIAL demotes ``MasterPeakID`` only ``if (result.MasterPeakID < 0)``."""
+    target = GapFillTarget(
+        quant=QuantIon(mz=85.03, kind=PRODUCT, tolerance=0.1, channel=110),
+        rt_center=5.0, rt_lo=4.5, rt_hi=5.5, peak_width=0.2,
+        estimated_noise=10.0,
+    )
+    peak = _product("b", 150.07, 1000.0, SPECTRUM)
+    result = GapFillResult(status=FILLED, height=444.0, area=88.0, rt_apex=5.01,
+                           rt_left=4.95, rt_right=5.06, sn_ratio=9.0)
+    out = requantify_peak(peak, target, result)
+    assert out.gap_fill_status == DETECTED
+    assert out.ms1_height == 444.0
+    assert out.ms2_rep_ion_mz == pytest.approx(85.03)
+    assert out.n_fragments == peak.n_fragments, "the spectrum is untouched"
+
+    # A re-read that finds nothing keeps the original detection rather than
+    # trading a real number for a zero.
+    empty = requantify_peak(peak, target, GapFillResult(status=NO_SIGNAL))
+    assert empty is peak
+
+
+# ---------------------------------------------------------------------------
+# One quantitation channel per row (SPEC 2026-08-02 §8.2)
+# ---------------------------------------------------------------------------
+
+def _ms2_only_feature(**kw) -> CandidateFeature:
+    base = dict(
+        signal_type="ms2_only", ms1_quant_mz=None, ms2_rep_ion_mz=70.0,
+    )
+    base.update(kw)
+    return _feature(**base)
+
+
+def test_any_exact_precursor_decides_the_whole_rows_channel():
+    """A row grouped from both kinds is still quantified on exactly one.
+
+    MS1 wins because a precursor m/z is a quantity that compares across rows,
+    runs and software; a fragment's response depends on how that compound
+    happened to fragment in that isolation window.
+    """
+    from metabo_core.alignment.gap_filler import choose_quant_channel
+
+    fragment_only = _ms2_only_feature(feature_id="frag", ms1_height=9000.0)
+    with_precursor = _feature(feature_id="ms1", ms1_height=100.0)
+
+    channel = choose_quant_channel(
+        [fragment_only, with_precursor], fragment_only, CFG,
+    )
+
+    assert channel is not None
+    assert channel.kind == MS1
+    # ...and on the MS1 cell's ion, even though the fragment-only cell is 90x
+    # taller: letting it vote would average a fragment m/z into a precursor m/z.
+    assert channel.mz == pytest.approx(with_precursor.ms1_quant_mz)
+    assert channel.tolerance == CFG.ms1_mz_tolerance
+
+
+def test_a_row_of_fragments_alone_stays_on_the_product_channel():
+    from metabo_core.alignment.gap_filler import choose_quant_channel
+
+    left = _ms2_only_feature(feature_id="a")
+    right = _ms2_only_feature(feature_id="b")
+
+    channel = choose_quant_channel([left, right], left, CFG)
+
+    assert channel is not None
+    assert channel.kind == PRODUCT
+    assert channel.tolerance == CFG.product_mz_tolerance
+
+
+def test_choose_quant_channel_is_consensus_quant_ion_on_a_single_route_row():
+    """The generalisation must be exact where the old rule already applied, or
+    every legacy row silently changes its quantitation ion."""
+    from metabo_core.alignment.gap_filler import (
+        choose_quant_channel, consensus_quant_ion,
+    )
+
+    for cells in (
+        [_feature(feature_id="a"), _feature(feature_id="b", ms1_quant_mz=110.0509)],
+        [_ms2_only_feature(feature_id="c"),
+         _ms2_only_feature(feature_id="d", ms2_rep_ion_mz=70.02)],
+    ):
+        assert (
+            choose_quant_channel(cells, cells[0], CFG)
+            == consensus_quant_ion(cells, cells[0], CFG)
+        )
+
+
+def test_requantitation_is_demanded_when_the_channel_kind_differs():
+    from metabo_core.alignment.gap_filler import gap_fill_target
+
+    fragment_only = _ms2_only_feature(feature_id="frag")
+    target = gap_fill_target([_feature(feature_id="ms1")], CFG)
+
+    assert target is not None and target.quant.kind == MS1
+    assert needs_requantitation(fragment_only, target, CFG)
+
+
+def test_a_cross_channel_requantitation_moves_the_route_with_the_numbers():
+    """Otherwise the cell reports a fragment m/z for a number measured on a
+    precursor, and every later reader of ``quant_route`` is misled."""
+    from metabo_core.alignment.gap_filler import gap_fill_target
+
+    fragment_only = _ms2_only_feature(feature_id="frag")
+    target = gap_fill_target([_feature(feature_id="ms1")], CFG)
+    result = GapFillResult(
+        status=DETECTED, height=1234.0, area=99.0,
+        rt_apex=5.0, rt_left=4.9, rt_right=5.1, sn_ratio=8.0,
+    )
+
+    updated = requantify_peak(fragment_only, target, result)
+
+    assert updated.quant_route == MS1
+    assert updated.ms1_quant_mz == pytest.approx(target.quant.mz)
+    assert updated.ms1_height == pytest.approx(1234.0)
+    assert not needs_requantitation(updated, target, CFG)
