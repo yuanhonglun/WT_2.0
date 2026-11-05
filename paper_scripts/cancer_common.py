@@ -380,7 +380,16 @@ def annotate_transitions(ids: list[str], t9: Table9, t8: pd.DataFrame, table10: 
             })
         r["is_internal_standard"] = bool(m["is_internal_standard"]) if m is not None else tid in IS_TRANSITIONS
         r["internal_standard_note"] = IS_TRANSITIONS.get(tid, "")
-        r["mz_source"] = MZ_SOURCE_PLACEHOLDER
+        # Precursor provenance of the discovery feature: carried from Supplementary Table 8
+        # (sheet Cohort_assay_features of the re-processed run) when that table has the columns;
+        # the submitted Table 8 has none, hence the placeholder.
+        prov_cols = [c for c in ("mz_source", "mz_confidence", "nl_n_support", "ms2_only_tier") if c in t8.columns]
+        if prov_cols:
+            for col in prov_cols:
+                v = t8.loc[tid][col] if tid in t8.index else ""
+                r[col] = "" if (v is None or (isinstance(v, float) and np.isnan(v))) else v
+        else:
+            r["mz_source"] = MZ_SOURCE_PLACEHOLDER
         rows.append(r)
     return pd.DataFrame(rows)
 

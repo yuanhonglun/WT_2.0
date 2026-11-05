@@ -6,11 +6,15 @@ Adapted from manuscript/fig 7/make_fig7.py and the Fig. 7 routine of
 revision_260722/scripts/analyze_cancer.py.  Panels:
 
   a  Signal-type composition of the processed discovery features (counts, not means).
-     PLACEHOLDER: drawn from the previously submitted Source Data sheet Fig7a_composition
-     until the cancer-discovery pools are re-processed.
+     Default: PLACEHOLDER drawn from the previously submitted Source Data sheet Fig7a_composition.
+     With --discovery-dir <dir> (the output of analyze_cancer_discovery.py): drawn from
+     <dir>/Fig7a_composition.csv, no placeholder stamp.
   b  PCA of the ten pooled discovery samples (80 % covariance ellipses, descriptive only).
-     PLACEHOLDER: drawn from the previously submitted sheet Fig7b_PCA (scores) and the
+     Default: PLACEHOLDER drawn from the previously submitted sheet Fig7b_PCA (scores) and the
      explained variance recorded in revision_260722/analysis/cancer_summary.json.
+     With --discovery-dir: drawn from <dir>/Fig7b_PCA.csv (scores and explained variance).
+     When <dir>/discovery_status.json says the negative-mode run is still pending, panels a
+     and b carry a "positive mode only" stamp instead.
   c  Free bile acids (cholic acid, deoxycholic acid isomer) across HC / BLD / LC stage I, III, IV.
   d  Conjugated bile acids (glycocholic, taurocholic isomer, tauroursodeoxycholic acid).
      c and d show ALL technically valid measurements of Supplementary Table 9 ("version B":
@@ -45,6 +49,8 @@ Inputs (all resolved relative to this file unless overridden on the command line
       clinical_info_120Samples.xlsx, ml_results/1.group_split  sex, age, 85/35 split
   ../fig 7/data/violin_data.xlsx, roc_valid.txt                published flags + published scores
   ../revision_260722/analysis/cancer_summary.json              PCA explained variance (placeholder b)
+  --discovery-dir: Fig7a_composition.csv, Fig7b_PCA.csv,       re-processed discovery pools
+      discovery_status.json                                    (analyze_cancer_discovery.py)
   analysis/cancer/tukey_sensitivity.csv, exclusion_counts.csv  Dunn + BH under versions A / B / C
   analysis/cancer/redo_predictions_valid_<comparison>.csv      re-derived per-participant probabilities
   analysis/cancer/redo_model_metrics.csv, original_models_metrics.csv   AUC + DeLong 95 % CI
@@ -194,6 +200,10 @@ def parse_args(argv=None):
                    help="intensity axis of the violin panels (log10 by default: all measurements span up to 3 decades)")
     p.add_argument("--no-placeholder-stamp", action="store_true",
                    help="do not print the '[[placeholder]]' tag inside panels a and b")
+    p.add_argument("--discovery-dir", type=Path, default=None,
+                   help="output folder of analyze_cancer_discovery.py (Fig7a_composition.csv, Fig7b_PCA.csv, "
+                        "discovery_status.json): draw panels a and b from the re-processed discovery pools "
+                        "instead of the submitted placeholders")
     p.add_argument("--seed", type=int, default=20261020, help="jitter seed (no effect on statistics)")
     return p.parse_args(argv)
 
@@ -201,6 +211,23 @@ def parse_args(argv=None):
 # --------------------------------------------------------------------------------------
 # data
 # --------------------------------------------------------------------------------------
+def load_discovery_panels(discovery_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, list[float], dict]:
+    """Panel a and b tables written by analyze_cancer_discovery.py (re-processed discovery pools).
+
+    Returns the composition table (category, signal_type, count), the PCA scores (sample, group,
+    PC1, PC2), the explained variance [PC1 %, PC2 %] and the status record (modes present,
+    negative_pending, software versions)."""
+    comp = pd.read_csv(discovery_dir / "Fig7a_composition.csv")
+    pca = pd.read_csv(discovery_dir / "Fig7b_PCA.csv")
+    explained = [float(pca["PC1_explained_pct"].iloc[0]), float(pca["PC2_explained_pct"].iloc[0])]
+    pca = pca[["sample", "group", "PC1", "PC2"]].copy()
+    status_path = discovery_dir / "discovery_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+    if status.get("include_tier_d") or status.get("legacy_comment_reader"):
+        raise ValueError(f"{discovery_dir}: written in reproduction mode (include_tier_d / legacy reader); not for the figure")
+    return comp, pca, explained, status
+
+
 @dataclass
 class Cohort:
     t9: cc.Table9
@@ -596,11 +623,34 @@ def main(argv=None) -> None:
     axes_d = [fig.add_subplot(gs[2, i * 4:i * 4 + 4]) for i in range(3)]
     axes_e = [fig.add_subplot(gs[3, i * 4:i * 4 + 4]) for i in range(3)]
 
-    # ---------------- a: signal-type composition (placeholder from the submitted Source Data) ----------------
-    comp = pd.read_excel(args.published_source_data, sheet_name="Fig7a_composition")
-    legacy = [c for c in comp["category"].unique() if c not in COMPOSITION_CATEGORIES]
-    assert len(legacy) == 1, f"unexpected categories in Fig7a_composition: {legacy}"
-    comp["category"] = comp["category"].replace({legacy[0]: FIRST_CATEGORY})
+    # ---------------- a, b: discovery-pool data (re-processed run via --discovery-dir, else the submitted placeholders) ----------------
+    if args.discovery_dir is not None:
+        comp, pca, explained, discovery_status = load_discovery_panels(args.discovery_dir)
+        negative_pending = bool(discovery_status.get("negative_pending", False))
+        versions = ", ".join(f"{m} v{v}" for m, v in discovery_status.get("software_version", {}).items())
+        ab_source = f"{args.discovery_dir.name} (analyze_cancer_discovery.py; ASFAMProcessor {versions})"
+        ab_note = "re-processed discovery pools" + ("; POSITIVE MODE ONLY, negative-mode re-run pending" if negative_pending else "")
+        ab_readme = ("re-processed discovery pools (analyze_cancer_discovery.py, ASFAMProcessor " + versions + ")"
+                     + ("; POSITIVE MODE ONLY, to be regenerated when the negative-mode re-run is analysed" if negative_pending else ""))
+        placeholder = False
+    else:
+        comp = pd.read_excel(args.published_source_data, sheet_name="Fig7a_composition")
+        legacy = [c for c in comp["category"].unique() if c not in COMPOSITION_CATEGORIES]
+        assert len(legacy) <= 1, f"unexpected categories in Fig7a_composition: {legacy}"
+        if legacy:
+            comp["category"] = comp["category"].replace({legacy[0]: FIRST_CATEGORY})
+        pca = pd.read_excel(args.published_source_data, sheet_name="Fig7b_PCA")
+        with open(args.pca_summary, encoding="utf-8") as fh:
+            explained = json.load(fh)["pca_explained_percent"]
+        negative_pending = False
+        ab_source = "Fig7a_composition"
+        ab_note = "PLACEHOLDER (previously submitted value)"
+        ab_readme = "PLACEHOLDER - previously submitted values; to be regenerated after the cancer-discovery re-run"
+        placeholder = True
+    missing = [c for c in COMPOSITION_CATEGORIES if c not in set(comp["category"])]
+    assert not missing, f"Fig7a_composition lacks categories {missing}"
+
+    # ---------------- a: signal-type composition ----------------
     totals = {c: int(comp.loc[comp["category"] == c, "count"].sum()) for c in COMPOSITION_CATEGORIES}
     y = np.arange(len(COMPOSITION_CATEGORIES))
     offsets = {"ms1_detected": -0.17, "ms2_only": 0.17}
@@ -612,8 +662,8 @@ def main(argv=None) -> None:
         for yy, value, c in zip(y + offsets[signal], values, COMPOSITION_CATEGORIES):
             share = 100.0 * value / max(totals[c], 1)
             ax_a.text(value * 1.09, yy, f"{value:,} ({share:.0f}%)", va="center", ha="left", fontsize=7)
-            numbers[f"fig7a_{c.replace(' ', '_').lower()}_{signal}"] = {"value": value, "source": f"{SCRIPT}:Fig7a_composition",
-                                                                         "note": f"PLACEHOLDER (previously submitted value); share {share:.0f}% of {totals[c]:,}"}
+            numbers[f"fig7a_{c.replace(' ', '_').lower()}_{signal}"] = {"value": value, "source": f"{SCRIPT}:{ab_source}",
+                                                                         "note": f"{ab_note}; share {share:.0f}% of {totals[c]:,}"}
     ax_a.set_xscale("log")
     ax_a.set_xlim(100, int(comp["count"].max()) * 4.6)
     ax_a.set_yticks(y)
@@ -625,10 +675,7 @@ def main(argv=None) -> None:
     style_axis(ax_a)
     panel_letter(ax_a, "a", dx=-52)
 
-    # ---------------- b: pooled-sample PCA (placeholder) ----------------
-    pca = pd.read_excel(args.published_source_data, sheet_name="Fig7b_PCA")
-    with open(args.pca_summary, encoding="utf-8") as fh:
-        explained = json.load(fh)["pca_explained_percent"]
+    # ---------------- b: pooled-sample PCA ----------------
     for group in ("HC", "BLD", "LC"):
         sub = pca[pca["group"] == group]
         colour = GROUP_COLOUR[group]
@@ -652,16 +699,23 @@ def main(argv=None) -> None:
     ax_b.legend(loc="lower right", handletextpad=0.25, fontsize=7, labelspacing=0.3)
     style_axis(ax_b)
     panel_letter(ax_b, "b")
-    numbers["fig7b_pc1_explained_percent"] = {"value": round(float(explained[0]), 1), "source": f"{SCRIPT}:{args.pca_summary.name}", "note": "PLACEHOLDER (previously submitted PCA)"}
-    numbers["fig7b_pc2_explained_percent"] = {"value": round(float(explained[1]), 1), "source": f"{SCRIPT}:{args.pca_summary.name}", "note": "PLACEHOLDER (previously submitted PCA)"}
-    if not args.no_placeholder_stamp:
+    b_source = ab_source if not placeholder else args.pca_summary.name
+    b_note = ab_note if not placeholder else "PLACEHOLDER (previously submitted PCA)"
+    numbers["fig7b_pc1_explained_percent"] = {"value": round(float(explained[0]), 1), "source": f"{SCRIPT}:{b_source}", "note": b_note}
+    numbers["fig7b_pc2_explained_percent"] = {"value": round(float(explained[1]), 1), "source": f"{SCRIPT}:{b_source}", "note": b_note}
+    stamp = None
+    if placeholder and not args.no_placeholder_stamp:
+        stamp = "[[placeholder: old discovery data]]"
+    elif negative_pending and not args.no_placeholder_stamp:
+        stamp = "[[positive mode only: negative-mode re-run pending]]"
+    if stamp:
         for ax, pos, ha, va in ((ax_a, (0.985, 0.62), "right", "center"), (ax_b, (0.03, 0.955), "left", "top")):
-            ax.text(*pos, "[[placeholder: old discovery data]]", transform=ax.transAxes, ha=ha, va=va, fontsize=6,
+            ax.text(*pos, stamp, transform=ax.transAxes, ha=ha, va=va, fontsize=6,
                     color=GREY, style="italic", zorder=6)
     sheets["Fig7a_composition"] = comp
     sheets["Fig7b_PCA"] = pca
-    readme["Fig7a_composition"] = "PLACEHOLDER - previously submitted counts (MS1-detected / MS2-only per category); to be regenerated after the cancer-discovery re-run"
-    readme["Fig7b_PCA"] = "PLACEHOLDER - previously submitted PCA scores of the ten discovery pools; to be regenerated after the cancer-discovery re-run"
+    readme["Fig7a_composition"] = ab_readme + "; counts of MS1-detected / MS2-only features per category"
+    readme["Fig7b_PCA"] = ab_readme + "; PCA scores of the ten discovery pools"
 
     # ---------------- c, d: bile acids, version B (all technically valid measurements) ----------------
     violin_numbers = []
@@ -791,10 +845,16 @@ def main(argv=None) -> None:
                              "convention": "key -> {value, source: <script>:<table>, note}"}}, fh, indent=2, ensure_ascii=False)
     cc.update_numbers(args.numbers, numbers, SCRIPT)
     print(f"  numbers: {len(numbers)} entries -> {args.numbers}")
-    write_legend(args.fig_dir / "legend_fig7.txt", violin_numbers, roc_numbers, args.yscale)
+    if placeholder:
+        ab_banner = "[[Fig 7a,b: to be regenerated after the cancer-discovery re-run]]\n\n"
+    elif negative_pending:
+        ab_banner = "[[Fig 7a,b: positive mode only; to be regenerated when the negative-mode re-run is analysed]]\n\n"
+    else:
+        ab_banner = ""
+    write_legend(args.fig_dir / "legend_fig7.txt", violin_numbers, roc_numbers, args.yscale, ab_banner)
 
 
-def write_legend(path: Path, violin_numbers: list[dict], roc_numbers: dict, yscale: str) -> None:
+def write_legend(path: Path, violin_numbers: list[dict], roc_numbers: dict, yscale: str, ab_banner: str = "") -> None:
     n_by = {v["transition_id"]: v["n_per_group"] for v in violin_numbers}
     hc = n_by["MN13238"]
     e1 = roc_numbers["LC_vs_BLD"]
@@ -809,9 +869,7 @@ def write_legend(path: Path, violin_numbers: list[dict], roc_numbers: dict, ysca
                  if yscale == "log" else "")
     text = f"""Fig. 7. WT 2.0 processing of lung-cancer serum discovery pools and the targeted cohort assay built from them.
 
-[[Fig 7a,b: to be regenerated after the cancer-discovery re-run]]
-
-a: Signal-type composition of the processed discovery features (counts, not means): all features retained after redundancy marking, those carrying a library annotation, those meeting the high-scoring criteria (Total score ≥ 1.4 and at least three matched peaks), and those taken forward into the scheduled-MRM transition list quantified in the cohort. Percentages are the MS1-detected and MS2-only shares within each category.
+{ab_banner}a: Signal-type composition of the processed discovery features (counts, not means): all features retained after redundancy marking, those carrying a library annotation, those meeting the high-scoring criteria (Total score ≥ 1.4 and at least three matched peaks), and those taken forward into the scheduled-MRM transition list quantified in the cohort. Percentages are the MS1-detected and MS2-only shares within each category.
 b: PCA of the ten pooled discovery samples processed with ASFAMProcessor (HC, n = 3 pools; BLD, n = 3 pools; LC, n = 4 pools); ellipses show the 80% covariance region and are descriptive only.
 c, d: Participant-level distributions of five bile-acid signals in the targeted cohort (HC, n = {hc['HC']}; BLD, n = {hc['BLD']}; stage I LC, n = {hc['Stage I LC']}; stage III LC, n = {hc['Stage III LC']}; stage IV LC, n = {hc['Stage IV LC']} participants; the number of measured values plotted is given under each group label and is smaller than the group size only where a signal was not detected). All technically valid measurements are shown; no outlier removal was applied. The version that applies the published outlier flags is given in the Supplementary Information ([[Supplementary Fig. 4b or a new Supplementary Fig.; numbering to be decided]]) and the per-participant inclusion status under both rules in the Source Data. Points show individual participants; violins show the distribution and embedded boxes show the median and interquartile range (whiskers to 1.5 x IQR). {axis_note} Groups were compared by a Kruskal–Wallis test followed by pairwise Dunn tests adjusted across all ten group pairs by the Benjamini–Hochberg method; brackets are drawn for the pairs annotated in the previously submitted figure and for the one pair whose adjusted significance changed when all measurements were included (cholic acid, HC vs stage I LC; q = 0.054 with the published flags, q = 0.048 with all measurements). *q < 0.05, **q < 0.01, ***q < 0.001. A dagger indicates authentic-standard confirmation; deoxycholic and taurocholic acid are isomer-level assignments.
 e: ROC curves of the classifiers re-derived entirely inside the 85-participant training set (feature screening, LASSO selection, tuning and cut-off) and scored once on the held-out internal validation participants. Left: LC vs BLD, the pre-specified primary comparison (held-out LC n = {e1['n_case']}, BLD n = {e1['n_control']}; panel of {e1['panel_size']} transitions); {MODEL_LONG[MAIN_MODEL]} (KNN, thick line, the model used in the previously submitted figure) AUC = {k1['auc']:.3f} (95% DeLong CI {k1['delong_lo']:.3f}–{k1['delong_hi']:.3f}); the four other models are drawn as thin lines (AUC {e1['others_range'][0]:.3f}–{e1['others_range'][1]:.3f}). The dashed grey curve is the previously submitted 20-metabolite KNN panel, whose candidate pool had been derived on all 120 participants, scored on the same held-out participants (AUC = {p1['auc']:.3f}, 95% CI {p1['delong_lo']:.3f}–{p1['delong_hi']:.3f}). The dotted grey curve is the clinical marker Cyfra21-1 alone on the same 20 participants (AUC = {cy['auc']:.3f}, 95% CI {cy['delong_lo']:.3f}–{cy['delong_hi']:.3f}); paired DeLong tests do not separate it from the re-derived KNN panel (p = {cy['paired_delong_p_vs_rederived_KNN']:.2f}) or from the previously submitted panel (p = {cy['paired_delong_p_vs_published_KNN']:.2f}). Middle and right: the same procedure for LC vs HC (held-out {e2['n_case']} vs {e2['n_control']}; panel of {e2['panel_size']} transition; KNN AUC = {k2['auc']:.3f}, 95% CI {k2['delong_lo']:.3f}–{k2['delong_hi']:.3f}) and LC vs non-LC (held-out {e3['n_case']} vs {e3['n_control']}; panel of {e3['panel_size']} transitions; KNN AUC = {k3['auc']:.3f}, 95% CI {k3['delong_lo']:.3f}–{k3['delong_hi']:.3f}; previously submitted panel AUC = {p3['auc']:.3f}). These two comparisons are exploratory and batch-confounded: the HC sera were collected and acquired as a separate batch, so any HC-involving separation cannot be attributed to disease. Both sets were drawn from the same 120-participant cohort, so all curves describe internal training and held-out internal validation, not external validation. The classifier is shown to demonstrate that ASFAM-derived transitions can be carried into a targeted assay and modelled; it is not diagnostic evidence. Per-model AUCs with confidence intervals for training (10-fold out-of-fold) and validation are given in Supplementary Fig. 5.

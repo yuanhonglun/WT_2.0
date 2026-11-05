@@ -65,6 +65,30 @@ A prebuilt Windows executable is also published on the
 Python installation; check its tag against the version of the source you are
 reading, as the build is cut at release time rather than on every commit.
 
+### System requirements
+
+- **Software.** Python ≥ 3.9 (64-bit). Dependencies, installed automatically by
+  `pip`: `pymzml ≥ 2.5.0`, `numpy ≥ 1.21`, `scipy ≥ 1.7`, `pandas ≥ 1.3`,
+  `matchms ≥ 0.18`, `msbuddy ≥ 0.2`, `matplotlib ≥ 3.5`, `PyQt5 ≥ 5.15`,
+  `lxml ≥ 4.6`, `psutil ≥ 5.9` (exact minimum versions are in the three
+  `pyproject.toml` files). The GUI needs the Qt platform libraries of the
+  operating system; the CLI does not.
+- **Operating systems.** Developed, tested and used for every result of the
+  WT 2.0 manuscript on Windows 11 with Python 3.12; the test suite also passes
+  on macOS with Python 3.12. The prebuilt executable is for 64-bit Windows 10/11.
+  Linux works from source (not routinely tested).
+- **Hardware.** No non-standard hardware; the GPU is not used. Peak memory is
+  independent of the number of samples (one sample is held in memory at a
+  time); the manuscript runs used a desktop workstation (Intel Core i9-13900,
+  64 GB RAM) with 4 worker processes.
+- **Install time.** About 2 to 5 minutes for the editable installation above on
+  a normal desktop (dominated by downloading the dependencies); the Windows
+  build only needs to be unzipped.
+- **Run time.** Roughly 0.5 to 2 minutes per 31-segment mzML file on the
+  workstation above, i.e. 15 to 60 minutes for one sample acquired in 31
+  segments; the 186-file rice data set of the manuscript (6 samples) took about
+  2.8 h and the two 100-file cancer discovery sets 0.8 and 1.5 h.
+
 ## Quick start
 
 **GUI:**

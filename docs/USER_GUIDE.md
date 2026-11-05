@@ -673,8 +673,6 @@ a table that lost a peak. Keep them in mind before changing those stages.
 **Citation.** If you use this software, please cite the WT 2.0 publication.
 *(Full citation details will be added upon publication.)*
 
-**License.** BSD 3-Clause with a Non-Commercial Clause: free for academic and
-non-commercial use; commercial use requires written permission from the author.
-See [`LICENSE`](../LICENSE).
+**License.** BSD 3-Clause License. See [`LICENSE`](../LICENSE).
 
 **Contact.** Honglun Yuan — Hainan University — yuanhonglun@hotmail.com

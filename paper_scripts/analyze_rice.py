@@ -93,16 +93,209 @@ STANDARD_FEATURES = {
 }
 CONFIRMED_STANDARD = "3-formylindole"
 
-# Four high-scoring MS2-only library matches shown in Fig. 6e.  They are tentative
-# candidates (MSI level 2); the selection is carried over from the first revision and no
-# literature-novelty claim is attached to them.
+# Salt-increased library matches shown in Fig. 6e.  The selection is carried over from the
+# first revision (four high-scoring MS2-only matches of the submitted export) and no
+# literature-novelty claim is attached to them.  On a re-processed export each one is
+# re-identified by retention time and MS2 spectrum (``resolve_selected_features``): a
+# candidate that is no longer resolved as a retained feature is dropped from the panel, a
+# candidate whose library match changed is relabelled with its current library name, and a
+# candidate that is MS1-detected after re-processing stays in the panel with that signal
+# type (its evidence level then is MSI level 2; MS2-only matches are tentative spectral
+# candidates based on an inferred precursor and carry no MSI level).
 SELECTED_MS2_ONLY_CANDIDATES = {
     "Phenacylamine": "F01816",
     "Quinoxaline": "F03762",
     "N-acetyl-tyrosine": "F04317",
     "Putative methoxylated flavanone glycoside": "F10828",
 }
-CANDIDATE_EVIDENCE_LEVEL = "High-scoring library match; tentative candidate (MSI level 2)"
+CANDIDATE_EVIDENCE_LEVEL = ("High-scoring library match of an MS2-only feature; tentative spectral candidate "
+                            "based on an inferred precursor (no MSI level assigned)")
+CANDIDATE_EVIDENCE_LEVEL_MS1 = ("High-scoring library match of an MS1-detected feature; tentative candidate "
+                                "(MSI level 2)")
+CANDIDATE_EVIDENCE_LEVEL_LOW = ("Library match below the high-scoring criterion; tentative candidate carried over "
+                                "from the submitted version")
+# Evidence of the submitted analysis (ids, retention times, MS2 spectra of the seven selected
+# signals) used to re-identify them on another export.
+OLD_EVIDENCE = REVISION_DIR / "analysis" / "rice_old" / "rice_selected_evidence.csv"
+SELECTION_NOTES: dict[str, dict] = {"not_found": {}, "relabelled": {}, "signal_type_changed": {}, "resolved": {}}
+
+# Coordinates of the seven selected features in the submitted export (ASFAMProcessor
+# v1.2.260721, analysis/rice_old/rice_selected_evidence.csv).  Feature ids are assigned
+# per run, so on any other export each feature is re-identified from its quantitation ion
+# (alignment_mz) or precursor m/z, its retention time and its library name
+# (``resolve_selected_features``); the ids above are only the submitted ones.
+SELECTED_REFERENCE = {
+    "3-formylindole": dict(old_id="F04771", precursor_mz=146.05990, quant_mz=146.05970, rt=4.551,
+                           name_key="indole-3-carbox"),
+    "β-carboline": dict(old_id="F05817", precursor_mz=169.05152, quant_mz=169.04919, rt=3.073,
+                        name_key="norharman"),
+    "Feruloyl putrescine": dict(old_id="F06224", precursor_mz=265.14744, quant_mz=177.05471, rt=2.692,
+                                name_key="feruloyl putrescine"),
+    "Phenacylamine": dict(old_id="F01816", precursor_mz=136.06302, quant_mz=91.05431, rt=1.683,
+                          name_key="phenacylamine"),
+    "Quinoxaline": dict(old_id="F03762", precursor_mz=131.06272, quant_mz=131.06922, rt=2.469,
+                        name_key="quinoxaline"),
+    "N-acetyl-tyrosine": dict(old_id="F04317", precursor_mz=224.08470, quant_mz=136.07522, rt=2.636,
+                              name_key="n-acetyl-tyrosine"),
+    "Putative methoxylated flavanone glycoside": dict(old_id="F10828", precursor_mz=465.14263, quant_mz=303.08014,
+                                                      rt=4.230, name_key="methoxy-7-o-beta-d-glucopyranosyl"),
+}
+
+
+def parse_spectrum(text: object) -> list[tuple[float, float]]:
+    peaks: list[tuple[float, float]] = []
+    for token in str(text if pd.notna(text) else "").split():
+        try:
+            mz, intensity = token.split(":")
+            peaks.append((float(mz), float(intensity)))
+        except ValueError:
+            continue
+    return peaks
+
+
+def spectral_cosine(a: list[tuple[float, float]], b: list[tuple[float, float]], tol: float = 0.01) -> tuple[float, int]:
+    """Cosine of two peak lists (each peak of ``a`` matched once to the closest unused peak of
+    ``b`` within ``tol`` Da, raw intensities); returns (cosine, number of shared peaks)."""
+    if not a or not b:
+        return 0.0, 0
+    used: set[int] = set()
+    dot, shared = 0.0, 0
+    for mz_a, i_a in a:
+        best_d, best_j = None, None
+        for j, (mz_b, _) in enumerate(b):
+            if j in used:
+                continue
+            d = abs(mz_a - mz_b)
+            if d <= tol and (best_d is None or d < best_d):
+                best_d, best_j = d, j
+        if best_j is not None:
+            used.add(best_j)
+            dot += i_a * b[best_j][1]
+            shared += 1
+    na = math.sqrt(sum(i * i for _, i in a))
+    nb = math.sqrt(sum(i * i for _, i in b))
+    return (dot / (na * nb) if na and nb else 0.0), shared
+
+
+def resolve_selected_features(frame: pd.DataFrame, rt_tol: float = 0.15, mz_tol: float = 0.02,
+                              min_cosine: float = 0.7) -> dict:
+    """Re-identify the three standards and the Fig. 6e candidates in the analysed export.
+
+    Feature ids are assigned per run, so each selected signal is re-identified from the
+    submitted analysis: among the retained rows within ``rt_tol`` min of its submitted
+    retention time, the row whose MS2 spectrum has the highest cosine (peaks matched within
+    0.01 Da) to the submitted spectrum (``OLD_EVIDENCE``) is taken when that cosine is at
+    least ``min_cosine``.  When the submitted evidence file is missing, the coordinate rule
+    of ``SELECTED_REFERENCE`` is used instead (quantitation ion or precursor m/z within
+    ``mz_tol`` Da, or the library name with the precursor inside the 1 Da window; best by
+    name hit, then retention-time distance, then Total score).
+
+    A standard that cannot be found stops the script.  A candidate that cannot be found is
+    dropped from Fig. 6e; a candidate whose current library match no longer contains the
+    submitted name is relabelled with its current library name; a candidate whose signal
+    type changed is kept and the change recorded.  All of this is written to
+    ``SELECTION_NOTES`` and printed.  ``STANDARD_FEATURES`` and
+    ``SELECTED_MS2_ONLY_CANDIDATES`` are updated in place and the mapping is returned.
+    """
+    kept = frame[frame["is_retained"]].copy()
+    kept["_rt"] = pd.to_numeric(kept["rt"], errors="coerce")
+    kept["_pmz"] = pd.to_numeric(kept["precursor_mz"], errors="coerce")
+    kept["_qmz"] = pd.to_numeric(kept["alignment_mz"], errors="coerce")
+    kept["_name"] = kept["name"].fillna("").astype(str).str.lower()
+    kept["_ts"] = pd.to_numeric(kept["total_score"], errors="coerce").fillna(-1.0)
+    old = None
+    if OLD_EVIDENCE.exists():
+        old = pd.read_csv(OLD_EVIDENCE, encoding="utf-8-sig", low_memory=False).set_index("display_name")
+        print(f"[selected] re-identification by retention time and MS2 spectrum against {OLD_EVIDENCE.name}")
+    mapping = {}
+    for target in (STANDARD_FEATURES, SELECTED_MS2_ONLY_CANDIDATES):
+        is_candidate = target is SELECTED_MS2_ONLY_CANDIDATES
+        for label in list(target):
+            ref = SELECTED_REFERENCE[label]
+            new_id, how = None, ""
+            old_row = old.loc[label] if old is not None and label in old.index else None
+            old_spec = parse_spectrum(old_row["ms2_spectrum"]) if old_row is not None else []
+            old_rt = float(old_row["rt"]) if old_row is not None else ref["rt"]
+            old_type = str(old_row["signal_type"]) if old_row is not None else ""
+            if old_spec:
+                in_rt = kept[(kept["_rt"] - old_rt).abs() <= rt_tol].copy()
+                scored = [spectral_cosine(old_spec, parse_spectrum(s)) for s in in_rt["ms2_spectrum"]]
+                in_rt["_cos"] = [c for c, _ in scored]
+                in_rt["_shared"] = [k for _, k in scored]
+                in_rt["_drt"] = (in_rt["_rt"] - old_rt).abs()
+                in_rt = in_rt.sort_values(["_cos", "_drt"], ascending=[False, True])
+                if len(in_rt) and float(in_rt["_cos"].iloc[0]) >= min_cosine:
+                    best = in_rt.iloc[0]
+                    new_id = str(best["feature_id"])
+                    how = (f"spectral cosine {best['_cos']:.3f}, {int(best['_shared'])}/{len(old_spec)} submitted peaks "
+                           f"shared, RT shift {best['_rt'] - old_rt:+.3f} min")
+                else:
+                    top = in_rt.head(3)
+                    how = ("no retained row within RT tolerance" if top.empty else
+                           "best cosine " + ", ".join(f"{fid} {c:.2f} ({t}, RT {rt:.2f})" for fid, c, t, rt in
+                                                      zip(top["feature_id"], top["_cos"], top["signal_type"], top["_rt"])))
+            else:
+                old_feature = kept[kept["feature_id"] == ref["old_id"]]
+                same = (len(old_feature) == 1 and abs(float(old_feature["_rt"].iloc[0]) - ref["rt"]) <= rt_tol
+                        and (abs(float(old_feature["_pmz"].iloc[0]) - ref["precursor_mz"]) <= mz_tol
+                             or abs(float(old_feature["_qmz"].iloc[0]) - ref["quant_mz"]) <= mz_tol))
+                if same:
+                    new_id, how = ref["old_id"], "submitted id still valid"
+                else:
+                    in_rt = kept[(kept["_rt"] - ref["rt"]).abs() <= rt_tol]
+                    hit_mz = ((in_rt["_pmz"] - ref["precursor_mz"]).abs() <= mz_tol) | ((in_rt["_qmz"] - ref["quant_mz"]).abs() <= mz_tol)
+                    hit_name = in_rt["_name"].str.contains(ref["name_key"], regex=False) & ((in_rt["_pmz"] - ref["precursor_mz"]).abs() <= 0.6)
+                    cands = in_rt[hit_mz | hit_name].copy()
+                    if not cands.empty:
+                        cands["_namehit"] = cands["_name"].str.contains(ref["name_key"], regex=False)
+                        cands["_drt"] = (cands["_rt"] - ref["rt"]).abs()
+                        cands = cands.sort_values(["_namehit", "_drt", "_ts"], ascending=[False, True, False])
+                        new_id, how = str(cands["feature_id"].iloc[0]), f"coordinate rule, {len(cands)} candidate row(s)"
+                    else:
+                        how = "no row matches the coordinate rule"
+            if new_id is None:
+                message = (f"[selected] {label}: submitted {ref['old_id']} (RT {old_rt:.3f} min) NOT FOUND in this "
+                           f"export ({how})")
+                if not is_candidate:
+                    near = kept.loc[(kept["_rt"] - old_rt).abs().nsmallest(5).index,
+                                    ["feature_id", "_pmz", "_qmz", "_rt", "signal_type", "name"]]
+                    raise SystemExit(f"analyze_rice: authentic standard '{label}' not found; nearest rows by RT:\n"
+                                     f"{near.to_string(index=False)}")
+                print(message + " -> dropped from Fig. 6e")
+                SELECTION_NOTES["not_found"][label] = {"submitted_id": ref["old_id"], "submitted_rt": old_rt,
+                                                       "submitted_signal_type": old_type, "detail": how}
+                del target[label]
+                continue
+            row = kept[kept["feature_id"] == new_id].iloc[0]
+            print(f"[selected] {label}: {ref['old_id']} -> {new_id} ({how}; precursor {row['_pmz']:.4f} [{row['mz_source']}], "
+                  f"quantitation ion {row['_qmz']:.4f}, RT {row['_rt']:.3f} min, {row['signal_type']}, "
+                  f"name '{row['name']}', Total score {row['_ts']:.4f})")
+            new_label = label
+            squash = lambda s: re.sub(r"[^a-z0-9]+", "", str(s).lower())
+            if is_candidate and squash(ref["name_key"]) not in squash(row["_name"]):
+                new_label = normalize_name(row["name"]) or label
+                print(f"[selected]   library match changed: '{label}' is relabelled '{new_label}' "
+                      f"(submitted precursor {ref['precursor_mz']:.4f}, current {row['_pmz']:.4f} [{row['mz_source']}])")
+                SELECTION_NOTES["relabelled"][label] = {"new_label": new_label, "feature_id": new_id,
+                                                        "submitted_precursor_mz": ref["precursor_mz"],
+                                                        "current_precursor_mz": float(row["_pmz"]),
+                                                        "current_mz_source": str(row["mz_source"]),
+                                                        "current_name": str(row["name"])}
+            if old_type and old_type != str(row["signal_type"]):
+                print(f"[selected]   signal type changed: {old_type} (submitted) -> {row['signal_type']}")
+                SELECTION_NOTES["signal_type_changed"][new_label] = {"feature_id": new_id, "submitted": old_type,
+                                                                     "current": str(row["signal_type"]),
+                                                                     "current_precursor_mz": float(row["_pmz"]),
+                                                                     "current_mz_source": str(row["mz_source"])}
+            SELECTION_NOTES["resolved"][new_label] = {"submitted_label": label, "submitted_id": ref["old_id"],
+                                                      "feature_id": new_id, "how": how}
+            if new_label != label:
+                items = [(new_label if k == label else k, v) for k, v in target.items()]
+                target.clear()
+                target.update(items)
+            target[new_label] = new_id
+            mapping[new_label] = new_id
+    return mapping
 
 
 def mix_with_white(hex_colour: str, white_fraction: float = 0.75) -> str:
@@ -438,14 +631,25 @@ def selected_evidence(stats_frame: pd.DataFrame) -> pd.DataFrame:
         })
     for label, feature_id in SELECTED_MS2_ONLY_CANDIDATES.items():
         row = by_id.loc[feature_id]
+        if not bool(row["high_score_annotation"]):
+            level = CANDIDATE_EVIDENCE_LEVEL_LOW
+        elif str(row["signal_type"]) == "ms2_only":
+            level = CANDIDATE_EVIDENCE_LEVEL
+        else:
+            level = CANDIDATE_EVIDENCE_LEVEL_MS1
         rows.append({
             "display_name": label,
             "feature_id": feature_id,
-            "evidence_level": CANDIDATE_EVIDENCE_LEVEL,
+            "evidence_level": level,
             "salt_response_status": salt_response_status(row),
             **row.to_dict(),
         })
     return pd.DataFrame(rows)
+
+
+def candidate_rows(evidence: pd.DataFrame) -> pd.DataFrame:
+    """Fig. 6e rows: every selected candidate (any evidence level other than the standards)."""
+    return evidence[~evidence["feature_id"].isin(STANDARD_FEATURES.values())].copy()
 
 
 def style_axis(ax: plt.Axes) -> None:
@@ -685,11 +889,11 @@ def make_figure(
         lambda f: short_status(by_id.loc[f], confirmed=(standard_of[f] == CONFIRMED_STANDARD)))
     source["Fig6d"] = d_source
 
-    # e: effect sizes of the selected high-scoring MS2-only tentative candidates.
-    cands = evidence[evidence["evidence_level"].eq(CANDIDATE_EVIDENCE_LEVEL)].copy()
-    fill, edge = signal_style["ms2_only"]
+    # e: effect sizes of the selected tentative candidates (markers coloured by signal type:
+    # purple MS2-only, blue MS1-detected; filled = meets the main criterion, open = exploratory).
+    cands = candidate_rows(evidence)
     if cands.empty:
-        ax_e.text(0.5, 0.5, "No MS2-only candidates selected", ha="center", va="center",
+        ax_e.text(0.5, 0.5, "No candidates selected", ha="center", va="center",
                   color=GRAY_EDGE, transform=ax_e.transAxes)
         ax_e.set_axis_off()
     else:
@@ -699,10 +903,10 @@ def make_figure(
         lo = cands["log2FC_CI_low"].to_numpy(float)
         hi = cands["log2FC_CI_high"].to_numpy(float)
         is_diff = cands["differential"].to_numpy(bool)
-        ax_e.hlines(y, lo, hi, color=edge, linewidth=LW)
-        ax_e.scatter(x0[is_diff], y[is_diff], s=35, facecolor=fill, edgecolor=edge, linewidth=LW, zorder=3)
-        if np.any(~is_diff):
-            ax_e.scatter(x0[~is_diff], y[~is_diff], s=35, facecolor="white", edgecolor=edge, linewidth=LW, zorder=3)
+        styles = [signal_style.get(str(s), signal_style["ms2_only"]) for s in cands["signal_type"]]
+        for yy, x, l, h, (fill, edge), d in zip(y, x0, lo, hi, styles, is_diff):
+            ax_e.hlines(yy, l, h, color=edge, linewidth=LW)
+            ax_e.scatter([x], [yy], s=35, facecolor=fill if d else "white", edgecolor=edge, linewidth=LW, zorder=3)
         ax_e.axvline(0, color=GRAY_EDGE, linestyle=(0, (3, 2)), linewidth=LW)
         plot_labels = cands["display_name"].replace({
             "Putative methoxylated flavanone glycoside": "Methoxylated flavanone\nglycoside (putative)"
@@ -718,14 +922,22 @@ def make_figure(
             ax_e.text(h + 0.12, yy, f"$q$={q:.2g}" + ("" if d else " (exploratory)"),
                       ha="left", va="center", fontsize=6.5, color=INK)
         ax_e.set_xlabel(r"log$_2$ fold change (95% CI)")
-        ax_e.set_title("Selected MS2-only tentative candidates", fontweight="bold", pad=4)
-        handles = [Line2D([], [], linestyle="none", marker="o", markersize=4.5, markerfacecolor=fill,
-                          markeredgecolor=edge, markeredgewidth=0.8, label=r"$q \leq 0.05$ and |log$_2$FC| $\geq$ 1")]
+        types_present = [t for t in ("ms2_only", "ms1_detected") if t in set(cands["signal_type"].astype(str))]
+        ax_e.set_title("Selected MS2-only tentative candidates" if types_present == ["ms2_only"]
+                       else "Selected tentative candidates", fontweight="bold", pad=4)
+        ref_fill, ref_edge = signal_style[types_present[0]] if types_present else signal_style["ms2_only"]
+        handles = [Line2D([], [], linestyle="none", marker="o", markersize=4.5, markerfacecolor=ref_fill,
+                          markeredgecolor=ref_edge, markeredgewidth=0.8, label=r"$q \leq 0.05$ and |log$_2$FC| $\geq$ 1")]
         if np.any(~is_diff):
             handles.append(Line2D([], [], linestyle="none", marker="o", markersize=4.5, markerfacecolor="white",
-                                  markeredgecolor=edge, markeredgewidth=0.8, label="exploratory"))
+                                  markeredgecolor=ref_edge, markeredgewidth=0.8, label="exploratory"))
+        if len(types_present) > 1:
+            for t, name in (("ms2_only", "MS2-only"), ("ms1_detected", "MS1-detected")):
+                f, e = signal_style[t]
+                handles.append(Line2D([], [], linestyle="none", marker="o", markersize=4.5, markerfacecolor=f,
+                                      markeredgecolor=e, markeredgewidth=0.8, label=name))
         ax_e.legend(handles=handles, loc="upper left", fontsize=6.5, handletextpad=0.2,
-                    borderaxespad=0.2, borderpad=0.2)
+                    borderaxespad=0.2, borderpad=0.2, ncol=2 if len(handles) > 2 else 1, columnspacing=0.9)
         style_axis(ax_e)
         panel_letter(ax_e, "e", dx=-16)
         e_source = cands[["display_name", "feature_id", "annotation_name_normalized", "signal_type", "ms2_only_tier",
@@ -861,7 +1073,7 @@ def readme_frame(meta: dict, counts: dict) -> pd.DataFrame:
             f"REPRODUCTION MODE (--include-tier-d): the {counts['ms2_only_tier_D']:,} fragment-poor rows were kept in the test family and in every count, as in the submitted table. Not for publication."
             if meta.get("include_tier_d") else
             f"Retained in sheet All_features_retained but NOT evaluated: excluded from the test family, from high-scoring annotations and from every count reported in the manuscript ({counts['ms2_only_tier_D']:,} rows in this table). They are reported once as 'fragment-poor MS2-only features: retained in the table, not evaluated'.")),
-        ("Annotation evidence", "Library matches are tentative candidates (MSI level 2) unless matched to an authentic standard; MS2-only annotations in particular are tentative candidates, not identified metabolites. Precursor m/z of MS2-only features is inferred (see mz_source / ms2_only_tier), not measured on an MS1 peak."),
+        ("Annotation evidence", "Library matches of MS1-detected features are tentative candidates (MSI level 2) unless matched to an authentic standard; library matches of MS2-only features are tentative spectral candidates based on an inferred precursor and carry no MSI level (they are not identified metabolites). Precursor m/z of MS2-only features is inferred (see mz_source / ms2_only_tier), not measured on an MS1 peak."),
         ("High-scoring annotation rule", f"Evaluated, annotated = True, total_score >= {HIGH_SCORE_MIN_SCORE} and >= {HIGH_SCORE_MIN_MATCHED} matched MS2 peaks."),
         ("Differential test", f"Two-sided Welch t-test on log2 median-normalized intensities of evaluated features directly detected in >= {MIN_DETECTED} of 6 samples (test family, n = {counts['eligible']:,}); Benjamini-Hochberg adjustment over this family. MAIN CRITERION: differential = FDR_BH <= {FDR_ALPHA} and |log2FC| >= {LOG2FC_MIN:g} (n = {counts['differential']:,}). The submitted criterion (p <= {P_ALPHA} and |log2FC| >= {LOG2FC_MIN:g}) is kept as the reference column exploratory_p0.05 (n = {counts['exploratory_p0.05']:,}) and is not used for any claim."),
         ("Missing values", "Zero values were imputed per feature as one-fifth of its minimum positive normalized intensity."),
@@ -977,8 +1189,14 @@ def build_summary(counts: dict, explained: np.ndarray, evidence: pd.DataFrame, m
     standard_text = "; ".join(
         f"{r.display_name}: {r.salt_response_status}" for r in standards.itertuples()
     )
-    cands = evidence[evidence["evidence_level"].eq(CANDIDATE_EVIDENCE_LEVEL)]
+    cands = candidate_rows(evidence)
     n_cand_diff = int(cands["differential"].sum())
+    n_cand_ms2 = int(cands["signal_type"].astype(str).eq("ms2_only").sum())
+    n_cand_ms1 = int(cands["signal_type"].astype(str).eq("ms1_detected").sum())
+    standard_summary = "; ".join(
+        f"{r['display_name']} {short_status(r, confirmed=(r['display_name'] == CONFIRMED_STANDARD))}"
+        for _, r in standards.iterrows()
+    )
     rows = [
         {"panel": "a", "item": "Retained features (MS1-detected / MS2-only)",
          "value": f"{counts['evaluated_ms1_detected']:,} / {counts['evaluated_ms2_only']:,} (total {counts['evaluated_features']:,})",
@@ -1005,13 +1223,14 @@ def build_summary(counts: dict, explained: np.ndarray, evidence: pd.DataFrame, m
          "caption_note": ("points are individual biological replicates (n = 3 per group) of log2(median-normalized "
                           "intensity + 1); bars show mean +/- s.d. (NOTE: the submitted legend said 95 % CI and "
                           "'normalized', while the submitted panel drew s.d. of raw heights; this draft plots normalized "
-                          "intensities and states s.d.); fold change and q (BH) are shown; only 3-formylindole is "
-                          "described as confirmed salt-responsive, feruloyl putrescine and beta-carboline are exploratory.")},
-        {"panel": "e", "item": "Selected MS2-only tentative candidates (salt-responsive / shown)",
+                          f"intensities and states s.d.); fold change and q (BH) are shown; {standard_summary}; only "
+                          "3-formylindole may be described as confirmed.")},
+        {"panel": "e", "item": "Selected tentative candidates (salt-responsive / shown)",
          "value": f"{n_cand_diff} / {len(cands)}",
-         "caption_note": ("log2 fold change with Welch 95 % CI for four high-scoring MS2-only library matches "
-                          "(tentative candidates, MSI level 2); filled markers meet the main criterion, open markers "
-                          "are exploratory; q values are printed. No claim about prior reports in rice is made.")},
+         "caption_note": (f"log2 fold change with Welch 95 % CI for {len(cands)} selected library matches "
+                          f"({n_cand_ms2} MS2-only: tentative spectral candidates based on an inferred precursor, purple; "
+                          f"{n_cand_ms1} MS1-detected: MSI level 2, blue); filled markers meet the main criterion, open "
+                          "markers are exploratory; q values are printed. No claim about prior reports in rice is made.")},
         {"panel": "all", "item": "Fragment-poor MS2-only features (tier D)",
          "value": f"{counts['ms2_only_tier_D']:,}",
          "caption_note": "retained in Supplementary Table 5, not evaluated; excluded from every count in this figure" + proxy + "."},
@@ -1078,6 +1297,32 @@ def build_numbers(counts: dict, check: dict, evidence: pd.DataFrame, explained: 
         put(f"{slug}_p", float(f"{row.p_value:.4g}"), note)
         put(f"{slug}_q", float(f"{row.FDR_BH:.4g}"), note)
         put(f"{slug}_differential", bool(row.differential), note)
+        put(f"{slug}_signal_type", str(row.signal_type), note)
+        put(f"{slug}_precursor_mz", round(float(row.precursor_mz), 4), f"{row.feature_id}; mz_source {row.mz_source}")
+        put(f"{slug}_mz_source", str(row.mz_source), note)
+        put(f"{slug}_total_score", round(float(row.total_score), 4) if pd.notna(row.total_score) else None,
+            f"{row.feature_id}; library name '{row.name}'")
+        put(f"{slug}_evidence_level", str(row.evidence_level), note)
+
+    cands = candidate_rows(evidence)
+    put("selected_candidates_shown", int(len(cands)), "rows of Fig. 6e")
+    put("selected_candidates_ms2_only", int(cands["signal_type"].astype(str).eq("ms2_only").sum()), "Fig. 6e rows that are MS2-only in this export")
+    put("selected_candidates_ms1_detected", int(cands["signal_type"].astype(str).eq("ms1_detected").sum()), "Fig. 6e rows that are MS1-detected in this export")
+    put("selected_candidates_differential", int(cands["differential"].sum()), "Fig. 6e rows meeting the main criterion")
+    put("selected_candidates_names", "; ".join(str(x) for x in cands["display_name"]), "Fig. 6e row labels in this export")
+    put("selected_not_found", "; ".join(f"{k} (submitted {v['submitted_id']}, {v['submitted_signal_type']}, RT {v['submitted_rt']:.2f} min; {v['detail']})"
+                                        for k, v in SELECTION_NOTES["not_found"].items()) or "none",
+        "submitted Fig. 6e candidates with no retained counterpart in this export (dropped from the panel)")
+    put("selected_relabelled", "; ".join(f"{k} -> {v['new_label']} ({v['feature_id']}; submitted precursor {v['submitted_precursor_mz']:.4f}, "
+                                         f"current {v['current_precursor_mz']:.4f} [{v['current_mz_source']}])"
+                                         for k, v in SELECTION_NOTES["relabelled"].items()) or "none",
+        "candidates whose library match changed with the re-processed precursor")
+    put("selected_signal_type_changed", "; ".join(f"{k} ({v['feature_id']}): {v['submitted']} -> {v['current']} (precursor {v['current_precursor_mz']:.4f} [{v['current_mz_source']}])"
+                                                  for k, v in SELECTION_NOTES["signal_type_changed"].items()) or "none",
+        "selected signals whose signal type differs from the submitted export")
+    put("selected_resolution", "; ".join(f"{v['submitted_label']} {v['submitted_id']} -> {k} {v['feature_id']} ({v['how']})"
+                                         for k, v in SELECTION_NOTES["resolved"].items()) or "none",
+        "how each selected signal was re-identified")
 
     rep = "reproduction check: submitted test family (tier D rows included; q identical to the submitted Table 5)"
     put("submitted_family_eligible", check["eligible"], rep)
@@ -1125,6 +1370,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"font family: {FONT_FAMILY}")
     frame, raw, normalized, imputed, log2, detected, meta = prepare_data(
         args.input, args.tier_column, args.min_fragments, include_tier_d=args.include_tier_d)
+    meta["selected_feature_ids"] = resolve_selected_features(frame)
     stats_frame = add_statistics(frame, imputed, log2, detected)
     check = submitted_family_check(stats_frame, imputed, log2, detected)
     counts = headline_counts(stats_frame)

@@ -11,7 +11,7 @@ Run order follows the table.
 | `features_io.py` | Shared: Reads features.csv without truncating names that contain '#' | — |
 | `paper_palette.py` | All figures: Shared colour-blind-safe palette | — |
 | `fig4_common.py` | Fig. 4: Shared readers / styles for the Fig. 4 scripts | — |
-| `run_dataset.py` | Re-processing: Runs ASFAMProcessor on one manuscript data set (presets rep3_full / rep3_ms1only / rep1 / rep2 / rice / cancer_pos / cancer_neg) | mzML files from MetaboLights MTBLS15138; lib/lcms/pos.msp |
+| `run_dataset.py` | Re-processing: Runs ASFAMProcessor on one manuscript data set (presets rep3_full / rep3_ms1only / rep1 / rep2 / rep123 / rice / cancer_pos / cancer_neg / exp_dilution / exp_blank / exp_mix) | mzML files (validation and rice: MetaboLights MTBLS15138; cancer discovery pools and supplementary experiments: from the corresponding author); pos.msp or Neg.msp (Zenodo, see Code availability) |
 | `precursor_sources.py` | Precursor provenance (Fig. 4, Supplementary Fig. NL): mz_source × mz_confidence × ms2_only_tier tallies, nl_n_support distribution | features.csv + _work/ of a run |
 | `nl_window_consistency.py` | Precursor provenance: Agreement between neutral-loss consensus and window centroid on MS2-only features | features.csv of a run |
 | `window_centroid_precision.py` | Precursor provenance: Window-centroid error against the quantified ion on MS1-detected features (sets the ms1_lowres window) | _work/ of a run + its mzML files |

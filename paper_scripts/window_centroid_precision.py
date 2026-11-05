@@ -78,7 +78,7 @@ def _window_stats(raw, feat) -> tuple[int, float]:
     """(n ions in window, base-peak share of window intensity) at the apex cycle."""
     rt = raw.rt_array
     cycle = raw.cycles[int(np.argmin(np.abs(rt - feat.rt_apex)))]
-    ch = float(feat.precursor_mz_nominal)
+    ch = float(raw.isolation_target(feat.precursor_mz_nominal))  # true window centre (1.4.261103)
     mask = (cycle.ms1_mz >= ch - 0.5) & (cycle.ms1_mz <= ch + 0.5)
     n = int(mask.sum())
     if n == 0:

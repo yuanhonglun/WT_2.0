@@ -13,9 +13,8 @@ AUTHOR_NAME = "Honglun Yuan"
 AUTHOR_EMAIL = "yuanhonglun@hotmail.com"
 AUTHOR_INSTITUTION = "Hainan University"
 LICENSE_TEXT = (
-    "BSD 3-Clause with Non-Commercial Clause<br>"
-    "Free for academic and non-commercial use. "
-    "Commercial use requires written permission from the author."
+    "BSD 3-Clause License<br>"
+    "See the LICENSE file distributed with the software."
 )
 COPYRIGHT_YEARS = "2025-2026"
 

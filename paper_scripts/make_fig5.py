@@ -5,7 +5,8 @@ WT 2.0 with ASFAMProcessor vs DDA and DIA with MS-DIAL.
 Revision 261019 edition of manuscript/fig 5/make_fig5.py.  Palette and
 caption title changed; the ASFAM inputs can be redirected with --asfam-dir so
 the re-processed exports (runs/rep{1,2,3}_full/features.csv) can replace the
-submitted files later.  While the default (old) inputs are used the outputs
+submitted files later.  The exports are read with features_io.read_features
+(header lines skipped by count, never comment="#").  While the default (old) inputs are used the outputs
 are named Fig5_preview_old_numbers.* so nobody mistakes them for final numbers.
 
 All three replicates, all three methods gated at S/N >= 3 (MS-DIAL's native
@@ -41,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import paper_palette as pp  # noqa: E402
+from features_io import read_features  # noqa: E402
 
 REPS = (1, 2, 3)
 # Neutral default; pass --asfam-dir explicitly when the exports live elsewhere.
@@ -89,33 +91,43 @@ def not_duplicate(frame: pd.DataFrame) -> pd.Series:
 
 def load_asfam(asfam_dir: Path):
     """WT 2.0 / ASFAM non-redundant set. Returns per-rep counts + pooled distributions."""
-    feat, ms1, ms2only, high = [], [], [], []
+    feat, ms1, ms2only, high, high_strict, tier_d = [], [], [], [], [], []
     sn, score = [], []
     for i in REPS:
         path = asfam_file(asfam_dir, i)
-        from features_io import read_features   # not comment="#": names may contain "#"
         a = read_features(path)
         a = a[a["feature_id"].astype(str).str.fullmatch(r"F\d+")]
         a = a[not_duplicate(a)]                          # is_duplicate == False only
         s = pd.to_numeric(a["sn_ratio"], errors="coerce")
         a = a[s >= 3]                                    # shared S/N >= 3 gate (MS-DIAL floor)
+        # Headline counts use MS2-only tiers A to C only (>= 3 product ions); the
+        # fragment-poor tier D rows (v1.4 exports) are reported once, not counted here.
+        n_tier_d = 0
+        if "ms2_only_tier" in a.columns:
+            is_d = a["ms2_only_tier"].fillna("").astype(str).str.strip() == "D"
+            n_tier_d = int(is_d.sum())
+            a = a[~is_d]
+        tier_d.append(n_tier_d)
         feat.append(len(a))
         ms1.append(int((a["signal_type"] == "ms1_detected").sum()))
         ms2only.append(int((a["signal_type"] == "ms2_only").sum()))
         ts = pd.to_numeric(a["total_score"], errors="coerce")
         high.append(int((ts >= 1.4).sum()))
+        nm = pd.to_numeric(a["n_matched"], errors="coerce").fillna(0) if "n_matched" in a.columns else pd.Series(0, index=a.index)
+        high_strict.append(int(((ts >= 1.4) & (nm >= 3)).sum()))
         sn.append(pd.to_numeric(a["sn_ratio"], errors="coerce").values)
         score.append(ts.dropna().values)
-        print(f"  ASFAM rep{i}: {path.name}  features={len(a)}")
+        print(f"  ASFAM rep{i}: {path.name}  features={len(a)} (tier D excluded: {n_tier_d})")
     ms1, ms2only = np.array(ms1), np.array(ms2only)
     return dict(feat=np.array(feat), ms1=ms1, ms2only=ms2only,
-                ms2cont=ms1 + ms2only, high=np.array(high),
+                ms2cont=ms1 + ms2only, high=np.array(high), high_strict=np.array(high_strict),
+                tier_d=np.array(tier_d),
                 sn=np.concatenate(sn), score=np.concatenate(score))
 
 
 def load_msdial(msdial_dir: Path, tag: str):
     """DDA or DIA MS-DIAL export. Returns per-rep counts + pooled distributions."""
-    feat, ms2cont, high = [], [], []
+    feat, ms2cont, high, high_strict = [], [], [], []
     sn, score = [], []
     for i in REPS:
         m = pd.read_csv(msdial_dir / f"{tag}-{i}.csv", low_memory=False)
@@ -126,9 +138,12 @@ def load_msdial(msdial_dir: Path, tag: str):
         ms2cont.append(int(msms.sum()))
         ts = pd.to_numeric(m["Total score"], errors="coerce")
         high.append(int((ts >= 1.4).sum()))
+        nm = pd.to_numeric(m["Matched peaks count"], errors="coerce").fillna(0)
+        high_strict.append(int(((ts >= 1.4) & (nm >= 3)).sum()))
         sn.append(pd.to_numeric(m["S/N"], errors="coerce").values)
         score.append(ts.dropna().values)
     return dict(feat=np.array(feat), ms2cont=np.array(ms2cont), high=np.array(high),
+                high_strict=np.array(high_strict),
                 sn=np.concatenate(sn), score=np.concatenate(score))
 
 
@@ -255,14 +270,17 @@ def main() -> None:
     style_axis(axB); panel_letter(axB, "b")
 
     # ===================== Panel c: high-scoring annotations =====================
-    meanC = [ms(wt["high"])[0], ms(dda["high"])[0], ms(dia["high"])[0]]
-    sdC = [ms(wt["high"])[1], ms(dda["high"])[1], ms(dia["high"])[1]]
+    # Drawn with the criterion used throughout the paper (Total score >= 1.4 and >= 3 matched
+    # library peaks; 2026-11-04). The counts at Total score >= 1.4 alone (the criterion of the
+    # submitted figure) stay in the numbers file as fig5_*_high_score.
+    meanC = [ms(wt["high_strict"])[0], ms(dda["high_strict"])[0], ms(dia["high_strict"])[0]]
+    sdC = [ms(wt["high_strict"])[1], ms(dda["high_strict"])[1], ms(dia["high_strict"])[1]]
     axC.bar(x, meanC, BW, color=FILL, edgecolor=EDGE, linewidth=1.0, yerr=sdC, error_kw=ERRKW)
-    for xi, values, edge in zip(x, [wt["high"], dda["high"], dia["high"]], EDGE):
+    for xi, values, edge in zip(x, [wt["high_strict"], dda["high_strict"], dia["high_strict"]], EDGE):
         replicate_points(axC, xi, values, edge)
     axC.set_ylim(0, (np.array(meanC) + np.array(sdC)).max() * 1.20)
     bar_labels(axC, x, meanC, [f"{v:,.0f}" for v in meanC], errs=sdC)
-    axC.set_ylabel("Annotations (total score ≥ 1.4)")
+    axC.set_ylabel("Annotations (score ≥ 1.4,\n≥ 3 matched peaks)")
     axC.set_title("High-scoring annotations", fontsize=8, fontweight="bold", pad=4)
     axC.set_xticks(x); axC.set_xticklabels(METHODS)
     style_axis(axC); panel_letter(axC, "c")
@@ -321,7 +339,42 @@ def main() -> None:
     for ext in ("svg", "pdf", "png"):
         fig.savefig(out_dir / f"{out_name}.{ext}", dpi=300, facecolor="white")
         print("wrote", out_dir / f"{out_name}.{ext}")
-    (out_dir / "legend_fig5.txt").write_text(LEGEND, encoding="utf-8")
+
+    # Numbers for the placeholders of the text (means of three replicates; medians of the
+    # pooled feature-level values).  Written next to the figure; merge_numbers.py picks it up.
+    import json
+    src = f"scripts/make_fig5.py on {asfam_dir} (WT 2.0) and {msdial_dir} (MS-DIAL)"
+    def mean_int(arr):
+        return int(round(float(np.mean(arr))))
+    numbers = {
+        "fig5_wt_features": {"value": mean_int(wt["feat"]), "source": src,
+                             "note": "retained rows, S/N >= 3, MS2-only tier D excluded; mean of three replicates"},
+        "fig5_wt_ms1_detected": {"value": mean_int(wt["ms1"]), "source": src, "note": "mean of three replicates"},
+        "fig5_wt_ms2only": {"value": mean_int(wt["ms2only"]), "source": src,
+                            "note": "MS2-only tiers A to C (>= 3 product ions); mean of three replicates"},
+        "fig5_wt_tier_d_excluded": {"value": mean_int(wt["tier_d"]), "source": src,
+                                    "note": "fragment-poor MS2-only rows (tier D) above S/N 3 that are not counted; mean of three replicates"},
+        "fig5_wt_high_score": {"value": mean_int(wt["high"]), "source": src, "note": "Total score >= 1.4 alone (criterion of the submitted Fig. 5c); mean of three replicates"},
+        "fig5_wt_high_score_strict": {"value": mean_int(wt["high_strict"]), "source": src,
+                                      "note": "Total score >= 1.4 and >= 3 matched library peaks (drawn in Fig. 5c); mean of three replicates"},
+        "fig5_dda_high_score_strict": {"value": mean_int(dda["high_strict"]), "source": src, "note": "Total score >= 1.4 and >= 3 matched peaks (MS-DIAL 'Matched peaks count'); mean of three replicates"},
+        "fig5_dia_high_score_strict": {"value": mean_int(dia["high_strict"]), "source": src, "note": "Total score >= 1.4 and >= 3 matched peaks (MS-DIAL 'Matched peaks count'); mean of three replicates"},
+        "fig5_wt_median_sn": {"value": round(float(np.median(wt["sn"])), 1), "source": src, "note": "median over the pooled features of three replicates"},
+        "fig5_wt_median_score": {"value": round(float(np.median(wt["score"])), 2), "source": src, "note": "median over the pooled annotated features of three replicates"},
+        "fig5_dda_features": {"value": mean_int(dda["feat"]), "source": src, "note": "mean of three replicates"},
+        "fig5_dia_features": {"value": mean_int(dia["feat"]), "source": src, "note": "mean of three replicates"},
+        "fig5_dda_high_score": {"value": mean_int(dda["high"]), "source": src, "note": "Total score >= 1.4 alone"},
+        "fig5_dia_high_score": {"value": mean_int(dia["high"]), "source": src, "note": "Total score >= 1.4 alone"},
+        "fig5_wt_features_per_rep": {"value": [int(v) for v in wt["feat"]], "source": src, "note": "rep 1, 2, 3"},
+        "fig5_wt_ms2only_per_rep": {"value": [int(v) for v in wt["ms2only"]], "source": src, "note": "rep 1, 2, 3"},
+        "fig5_wt_high_score_strict_per_rep": {"value": [int(v) for v in wt["high_strict"]], "source": src, "note": "rep 1, 2, 3"},
+        "fig5_preview": {"value": bool(preview), "source": src, "note": "True when drawn from the submitted (old) exports"},
+    }
+    with open(out_dir / f"numbers_{out_name.lower()}.json", "w", encoding="utf-8") as fh:
+        json.dump(numbers, fh, indent=2, ensure_ascii=False)
+    print("wrote", out_dir / f"numbers_{out_name.lower()}.json")
+    legend = LEGEND if preview else "\n".join(l for l in LEGEND.splitlines() if not l.startswith("NOTE:")) + "\n"
+    (out_dir / "legend_fig5.txt").write_text(legend, encoding="utf-8")
     plt.close(fig)
 
 

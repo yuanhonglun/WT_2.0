@@ -275,8 +275,17 @@ def run_outcome(matcher: Matcher, feats: dict, selfval: pd.DataFrame, centroid: 
     return numbers
 
 
+def adopted_nl_window_da() -> float:
+    """The nl_consensus library window of the build (asfam.config; 0.05 Da since 1.4.261020.2)."""
+    try:
+        from asfam.config import ProcessingConfig
+        return float(ProcessingConfig().annotation_precursor_window_by_source["nl_consensus"])
+    except Exception:  # noqa: BLE001 - the script must still run without the app installed
+        return 0.05
+
+
 def window_recommendation(summ_df: pd.DataFrame, out: Path) -> dict:
-    """Compare the NL windows and pick one.
+    """Compare the NL windows; "recommended" marks the window adopted in the build.
 
     Two counts per window, both on the self-validation features: how many of the
     truth-confirmed top-1 compounds the NL precursor keeps ("correct kept") and
@@ -313,19 +322,38 @@ def window_recommendation(summ_df: pd.DataFrame, out: Path) -> dict:
     win_df = pd.DataFrame(win_rows).sort_values("window_da").reset_index(drop=True)
     win_df["marginal_correct_vs_narrower"] = win_df["n_same_compound"].diff().fillna(0).astype(int)
     win_df["marginal_unconfirmed_vs_narrower"] = win_df["n_unconfirmed_hits_without_truth"].diff().fillna(0).astype(int)
-    best = win_df.sort_values(["net_same_minus_other_formula_minus_unconfirmed", "window_da"],
-                              ascending=[False, True]).iloc[0]
+    net_best = win_df.sort_values(["net_same_minus_other_formula_minus_unconfirmed", "window_da"],
+                                  ascending=[False, True]).iloc[0]
     widest = win_df.sort_values("window_da").iloc[-1]
-    rec_line = (f"RECOMMENDATION (production nl_consensus window): {best['window_da']} Da. On the {best['n_truth_hit']} "
+    # "recommended" = the nl_consensus window adopted in the build (asfam.config), not the window
+    # with the largest net count: the build's setting is the fact the tables report, and the net
+    # counts of all three windows are written out so the trade-off stays explicit (coordinator,
+    # 2026-11-04; on the v4 run the net counts differ by 3 and the largest one is 0.5 Da).
+    adopted_da = adopted_nl_window_da()
+    win_df["adopted"] = (win_df["window_da"] - adopted_da).abs() < 1e-9
+    if not win_df["adopted"].any():
+        raise RuntimeError(f"adopted nl_consensus window {adopted_da} Da is not among the NL arms {list(win_df['window_da'])}")
+    win_df["recommended"] = win_df["adopted"]
+    win_df["largest_net"] = win_df["arm"] == net_best["arm"]
+    best = win_df[win_df["adopted"]].iloc[0]
+    others = win_df[~win_df["adopted"]]
+    nets = win_df["net_same_minus_other_formula_minus_unconfirmed"]
+    unconf = int(best["n_unconfirmed_hits_without_truth"])
+    fewest = unconf <= int(others["n_unconfirmed_hits_without_truth"].min()) if len(others) else True
+    rec_line = (f"ADOPTED nl_consensus window (build setting): {best['window_da']:g} Da. On the {best['n_truth_hit']} "
                 f"self-validation features with a truth-confirmed high-score annotation it keeps "
                 f"{best['n_same_compound']} ({best['n_same_compound'] / best['n_truth_hit'] * 100:.0f}%) correct top-1 "
-                f"compounds (widest window {widest['window_da']} Da: {widest['n_same_compound']}), gives "
-                f"{best['n_other_formula']} different-formula top-1 hits, and produces {best['n_unconfirmed_hits_without_truth']} "
-                f"high-score hits on features whose true precursor gives none at 0.01 Da (widest: "
-                f"{widest['n_unconfirmed_hits_without_truth']}); each widening step adds more unconfirmed hits than "
-                f"correct ones: " +
-                "; ".join(f"{r['window_da']} Da: {r['n_same_compound']} correct / {r['n_other_formula']} other formula / "
-                          f"{r['n_unconfirmed_hits_without_truth']} unconfirmed"
+                f"compounds (widest window {widest['window_da']:g} Da: {widest['n_same_compound']}), gives "
+                f"{best['n_other_formula']} different-formula top-1 hits, and adds "
+                + ("the fewest " if fewest else "") + f"unconfirmed high-score hits on features whose true precursor "
+                f"gives none at 0.01 Da ({unconf}, against "
+                + " and ".join(f"{int(r['n_unconfirmed_hits_without_truth'])}" for _, r in others.iterrows())
+                + " for " + " and ".join(f"{r['window_da']:g} Da" for _, r in others.iterrows())
+                + f"). The net counts (correct - other formula - unconfirmed) of the three windows differ by at most "
+                f"{int(nets.max() - nets.min())} (largest net: {net_best['window_da']:g} Da): " +
+                "; ".join(f"{r['window_da']:g} Da: {r['n_same_compound']} correct / {r['n_other_formula']} other formula / "
+                          f"{r['n_unconfirmed_hits_without_truth']} unconfirmed, net "
+                          f"{r['net_same_minus_other_formula_minus_unconfirmed']}"
                           + (f" (+{r['marginal_correct_vs_narrower']} correct, +{r['marginal_unconfirmed_vs_narrower']} "
                              f"unconfirmed vs the narrower window)" if i else "")
                           for i, (_, r) in enumerate(win_df.iterrows())) +
@@ -335,11 +363,13 @@ def window_recommendation(summ_df: pd.DataFrame, out: Path) -> dict:
                 (f"{ref['basepeak_0.01'][0]} and adds {ref['basepeak_0.01'][1]} (the truth centroid itself sits > 0.01 Da "
                  f"from the real ion for about half of the features, so part of the unconfirmed hits are genuine)"
                  if "basepeak_0.01" in ref else "n/a") + ".")
-    win_df["recommended"] = win_df["arm"] == best["arm"]
     win_df.to_csv(out / "annotation_outcome_windows.csv", index=False)
     pd.set_option("display.width", 250)
     print(win_df.to_string(index=False)); print(rec_line, flush=True)
-    return {"outcome_recommended_nl_window_da": float(best["window_da"]), "outcome_recommendation": rec_line}
+    return {"outcome_recommended_nl_window_da": float(best["window_da"]),
+            "outcome_adopted_nl_window_da": float(best["window_da"]),
+            "outcome_largest_net_nl_window_da": float(net_best["window_da"]),
+            "outcome_recommendation": rec_line}
 
 
 # --------------------------------------------------------------------------- #

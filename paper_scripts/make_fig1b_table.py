@@ -55,17 +55,27 @@ ROWS = [
     ("Acquisition mode",
      [["Data-dependent (top-N)"], ["Data-independent (SWATH)"], ["Data-independent (HR-MRM)"]]),
     ("Isolation width (Q1)",
-     [["\u22481 Da"], ["variable SWATH windows", "[[dia_window]]"], ["1 Da, stepped"]]),
+     # SWATH as acquired for Figs. 3 and 5 (Methods): 30 overlapping 2 Da windows per
+     # method, stepped by 1 Da (2 Da is the narrowest window the instrument permits).
+     [["\u22481 Da"], ["2 Da, overlapping,", "stepped by 1 Da"], ["1 Da, stepped"]]),
     ("Injections per sample",
      [["31"], ["31"], ["31"]]),
     ("MS2 triggering depends on MS1?",
      [["Yes"], ["No"], ["No"]]),
+    # Cycle times measured on the instrument across the 31 methods of each mode
+    # (student's reading of the method files, 2026-11-04): DDA 0.921-0.954 s,
+    # SWATH 0.934-0.950 s, ASFAM 0.942-0.943 s.
     ("Cycle time",
-     [["[[cycle_time_dda]]"], ["[[cycle_time_dia]]"], ["[[cycle_time_wt2]]"]]),
+     [["921 to 954 ms"], ["934 to 950 ms"], ["942 to 943 ms"]]),
+    # Fig. 5 comparison, means of three technical replicates at S/N >= 3 (2026-11-04):
+    # DDA and DIA from the MS-DIAL exports (unchanged), WT 2.0 from the three replicates
+    # re-processed with ASFAMProcessor 1.4.261103 (MS2-only tier D excluded).
+    # High-score annotations = Total score >= 1.4 with >= 3 matched library peaks, the
+    # rule used throughout the paper (figures/fig5/numbers_fig5.json, analysis/fig5_v4/).
     ("Features observed",
-     [["[[n_features_dda]]"], ["[[n_features_dia]]"], ["[[n_features_wt2]]"]]),
+     [["5,116"], ["5,119"], ["13,594"]]),
     ("High-score annotations",
-     [["[[n_annot_dda]]"], ["[[n_annot_dia]]"], ["[[n_annot_wt2]]"]]),
+     [["817"], ["763"], ["522"]]),
 ]
 
 # ---- geometry (pt, SVG user units) ------------------------------------------

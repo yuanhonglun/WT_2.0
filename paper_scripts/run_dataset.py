@@ -14,10 +14,13 @@ Usage (from anywhere; paths are absolute):
     python run_dataset.py rep1        --raw-dir <dir holding RL_ASFAM_*_P_1.mzML>
     python run_dataset.py rep2        --raw-dir <dir holding RL_ASFAM_*_P_2.mzML>
 
-(The rice, cancer and rep1/rep2 raw files are deposited in MetaboLights MTBLS15138;
-pass the folder they were downloaded to.)
+(The rice and rep1/rep2 raw files are deposited in MetaboLights MTBLS15138; pass the
+folder they were downloaded to. The cancer discovery pools and the exp_* files are
+available from the corresponding author.)
 
-Options: ``--library`` (default lib/lcms/pos.msp), ``--out`` (default
+Options: ``--library`` (default: the preset's library; lib/lcms/pos.msp for positive
+mode, lib/lcms/Neg.msp or the file named by the environment variable
+``WT2_NEG_LIBRARY`` for negative mode), ``--out`` (default
 runs/<dataset>/), ``--dry-run`` (print the command only), ``--set FIELD=JSON``
 (repeatable, forwarded to the asfam CLI after the preset's own overrides),
 ``--expect-version`` (abort unless the installed build reports this version;
@@ -32,6 +35,15 @@ Presets (file globs are what the submitted runs used, recovered from the
     rice          CK_*_P_{1,2,3}.mzML + S_*_P_{1,2,3}.mzML           186 files, 6 samples
     cancer_pos    *_MRMHR_P_*.mzML, positive mode                    100 files, 10 samples
     cancer_neg    *_MRMHR_N_*.mzML, negative mode                    100 files, 10 samples
+    exp_dilution  DIL_*.mzML (--raw-dir; convert_experiments.py output)  198 files, 33 samples
+    exp_blank     BLK_*.mzML (--raw-dir; convert_experiments.py output)  186 files,  6 samples
+    exp_mix       MIX_*.mzML (--raw-dir; convert_experiments.py output)   90 files,  6 samples
+
+The CLI groups files into samples by the replicate number parsed from the file
+name (``parse_filename(...)["rep"]``), so the rice / cancer / rep1 / rep2 raw
+files must carry that number in the same position as the exp_* files do
+(``<prefix>_<seg>_<k>.mzML``); files named only by a sample prefix collapse
+into one sample. The exp_* folders were produced by convert_experiments.py.
 
 Nothing here changes a config value away from the build's defaults except the
 documented ablation switch and the ionisation mode: the numbers in the paper
@@ -57,6 +69,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REVISION_DIR = SCRIPT_DIR.parent
 REPO = REVISION_DIR.parents[1]          # .../metabo-platform
 DEFAULT_LIBRARY = REPO / "lib" / "lcms" / "pos.msp"
+# Negative-ion library (same merge as pos.msp, 2025-02-06). A negative-mode preset must
+# use it: the 2026-11-04 cancer_neg run with pos.msp annotated 19 features instead of
+# several hundred and had to be repeated. Default location lib/lcms/Neg.msp; override
+# with the environment variable WT2_NEG_LIBRARY or with --library.
+NEG_LIBRARY = Path(os.environ.get("WT2_NEG_LIBRARY") or (REPO / "lib" / "lcms" / "Neg.msp"))
 
 PRESETS: dict[str, dict] = {
     "rep3_full": {
@@ -74,6 +91,13 @@ PRESETS: dict[str, dict] = {
              "mode": "positive", "set": []},
     "rep2": {"raw_dir": None, "globs": ["RL_ASFAM_*_P_2.mzML"], "n_files": 31,
              "mode": "positive", "set": []},
+    # The three technical replicates of the validation sample processed together as
+    # three samples (2026-11-04): gives n_detected per aligned row for the
+    # replicate-consistency panel of Supplementary Fig. 8. Fig. 5 keeps the three
+    # single-replicate runs (rep1, rep2, rep3_full_v4).
+    "rep123": {"raw_dir": None,
+               "globs": ["RL_ASFAM_*_P_1.mzML", "RL_ASFAM_*_P_2.mzML", "RL_ASFAM_*_P_3.mzML"],
+               "n_files": 93, "mode": "positive", "set": []},
     "rice": {"raw_dir": None,
              "globs": ["CK_*_P_*.mzML", "S_*_P_*.mzML"], "n_files": 186,
              "mode": "positive", "set": []},
@@ -82,7 +106,21 @@ PRESETS: dict[str, dict] = {
                    "mode": "positive", "set": []},
     "cancer_neg": {"raw_dir": None,
                    "globs": ["*_MRMHR_N_*.mzML"], "n_files": 100,
-                   "mode": "negative", "set": []},
+                   "mode": "negative", "set": [], "library": NEG_LIBRARY},
+    # Reviewer-2 supplementary experiments (2026-11-03). The mzML files were
+    # written by convert_experiments.py as <EXP>_<segment>_<k>.mzML, where k is
+    # the per-sample number the CLI groups on (sample_map.csv in each folder).
+    # Pass the folder with --raw-dir (the development machine kept them under
+    # <data drive>/WT2 supplementary data/mzML/{dilution,blank,mix}).
+    "exp_dilution": {"raw_dir": None,
+                     "globs": ["DIL_*.mzML"], "n_files": 198,
+                     "mode": "positive", "set": []},
+    "exp_blank": {"raw_dir": None,
+                  "globs": ["BLK_*.mzML"], "n_files": 186,
+                  "mode": "positive", "set": []},
+    "exp_mix": {"raw_dir": None,
+                "globs": ["MIX_*.mzML"], "n_files": 90,
+                "mode": "positive", "set": []},
 }
 
 
@@ -96,7 +134,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dataset", choices=sorted(PRESETS))
     ap.add_argument("--raw-dir", default=None, help="override the preset's raw directory")
-    ap.add_argument("--library", default=str(DEFAULT_LIBRARY))
+    ap.add_argument("--library", default=None,
+                    help="spectral library (default: the preset's library, else lib/lcms/pos.msp)")
     ap.add_argument("--out", default=None, help="output directory (default runs/<dataset>)")
     ap.add_argument("--set", action="append", default=[], metavar="FIELD=JSON")
     ap.add_argument("--workers", type=int, default=4)
@@ -121,7 +160,11 @@ def main() -> int:
               f"in {raw_dir}", file=sys.stderr)
         if not args.dry_run:
             return 2
-    library = Path(args.library)
+    library = Path(args.library) if args.library else Path(preset.get("library") or DEFAULT_LIBRARY)
+    if preset["mode"] == "negative" and library.resolve() == DEFAULT_LIBRARY.resolve():
+        print(f"[{args.dataset}] negative mode with the positive-ion library {library}; pass --library",
+              file=sys.stderr)
+        return 2
     if not library.exists():
         print(f"library not found: {library}", file=sys.stderr)
         return 2

@@ -281,7 +281,7 @@ def panel_c(ax, sims):
     counts, _, _ = ax.hist(sims, bins=np.linspace(0, 2, 21), color=light(WT_BLUE), edgecolor=WT_BLUE, linewidth=LW)
     med = float(np.median(sims))
     ax.axvline(med, color=VERMILION, linestyle="--", linewidth=LW)
-    ax.text(med - 0.04, counts.max() * 0.95, f"median {med:.3f}", color=VERMILION, ha="right", va="top")
+    ax.text(0.03, 0.97, f"median {med:.3f}", color=VERMILION, ha="left", va="top", transform=ax.transAxes)
     ax.set_xlim(0, 2); ax.set_xlabel("Composite similarity (0–2)"); ax.set_ylabel("Matched-pair count")
     ax.set_title(f"MS2 consistency (n = {len(sims)})")
     despine(ax)
@@ -336,9 +336,12 @@ def panel_f(ax, inf):
             ax.text(bar.get_x() + bar.get_width() / 2, v + 1.0, f"{v:.0f}", ha="center", va="bottom",
                     fontsize=6.5, color=TEXT)
     ax.set_xticks(x); ax.set_xticklabels([f"≤{t} ppm" for t in thr])
-    ax.set_ylabel("Within tolerance (%)"); ax.set_ylim(0, 100)
+    # headroom above the tallest bar label so the legend never covers a value
+    ax.set_ylabel("Within tolerance (%)"); ax.set_ylim(0, 140)
+    ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_title("Precision by number of votes")
-    ax.legend(loc="upper left", handlelength=0.9, handletextpad=0.4, labelspacing=0.25, fontsize=7)
+    ax.legend(loc="upper left", ncol=2, handlelength=0.9, handletextpad=0.4, columnspacing=0.8,
+              labelspacing=0.25, fontsize=6.5, borderaxespad=0.2)
     despine(ax)
 
 
@@ -605,12 +608,25 @@ def main() -> int:
     if oc is not None:
         n_outcome = int(oc[oc["stratum_type"] == "all"]["n_truth_hit"].iloc[0])
     if win_path.exists():
-        win = pd.read_csv(win_path)
+        # "recommended" marks the window adopted in the build (annotation_outcome.py), not the
+        # window with the largest net count; the legend states both facts.
+        win = pd.read_csv(win_path).sort_values("window_da").reset_index(drop=True)
         best = win[win["recommended"]].iloc[0]
-        rec_line = (f"At ±{best['window_da']} Da the NL precursor keeps {best['n_same_compound']}/{best['n_truth_hit']} "
-                    f"correct top-1 compounds and admits {best['n_other_formula']} different-formula hits "
-                    f"(0.05 / 0.1 / 0.5 Da: " + ", ".join(f"{int(r['n_same_compound'])} correct / {int(r['n_other_formula'])} other formula"
-                                                         for _, r in win.iterrows()) + ").")
+        others = win[~win["recommended"]]
+        nets = win["net_same_minus_other_formula_minus_unconfirmed"]
+        unconf = int(best["n_unconfirmed_hits_without_truth"])
+        fewest = unconf <= int(others["n_unconfirmed_hits_without_truth"].min()) if len(others) else True
+        rec_line = (f"The {best['window_da']:g} Da window adopted in the build retains the same top-1 compound for "
+                    f"{int(best['n_same_compound'])}/{int(best['n_truth_hit'])} "
+                    f"({best['n_same_compound'] / best['n_truth_hit'] * 100:.0f}%) and adds "
+                    + ("the fewest unconfirmable hits" if fewest else "unconfirmable hits")
+                    + f" ({unconf}, against " + " and ".join(f"{int(r['n_unconfirmed_hits_without_truth'])}" for _, r in others.iterrows())
+                    + " for " + " and ".join(f"{r['window_da']:g} Da" for _, r in others.iterrows())
+                    + f"); the net counts (same compound minus other formula minus unconfirmable) of the three windows "
+                    f"differ by at most {int(nets.max() - nets.min())} ("
+                    + " / ".join(f"{r['window_da']:g} Da" for _, r in win.iterrows()) + ": "
+                    + ", ".join(f"{int(r['n_same_compound'])} same compound / {int(r['n_other_formula'])} other formula / "
+                                f"{int(r['n_unconfirmed_hits_without_truth'])} unconfirmable" for _, r in win.iterrows()) + ").")
 
     def stat(lvl, col):
         r = scen[(scen["scenario"] == "masked_ge5") & (scen["n_support"] == lvl)]

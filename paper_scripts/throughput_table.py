@@ -48,6 +48,10 @@ def asfam_counts(path: Path) -> dict:
     from features_io import read_features
     a = read_features(path, retained_only=True)
     a = a[pd.to_numeric(a["sn_ratio"], errors="coerce") >= SN_FLOOR]
+    n_all_tiers = len(a)
+    if "ms2_only_tier" in a.columns:
+        # headline counts use MS2-only tiers A to C only; tier D rows are reported separately
+        a = a[a["ms2_only_tier"].fillna("").astype(str).str.strip() != "D"]
     ts = pd.to_numeric(a["total_score"], errors="coerce")
     high = ts >= HIGH_SCORE
     if "n_matched" in a.columns:
@@ -62,7 +66,8 @@ def asfam_counts(path: Path) -> dict:
     if "ms2_only_tier" in a.columns:
         tier = a["ms2_only_tier"].fillna("").astype(str)
         out["ms2_only_tier_abc"] = int(((a["signal_type"] == "ms2_only") & (tier != "D")).sum())
-        out["ms2_only_tier_d"] = int((tier == "D").sum())
+        out["ms2_only_tier_d"] = n_all_tiers - len(a)
+        out["features_all_tiers"] = n_all_tiers
     return out
 
 
@@ -114,18 +119,19 @@ def main() -> int:
         "DDA (MS-DIAL)": summarise([msdial_counts(Path(args.msdial_dir) / f"DDA-{i}.csv") for i in (1, 2, 3)]),
         "DIA (MS-DIAL)": summarise([msdial_counts(Path(args.msdial_dir) / f"DIA-{i}.csv") for i in (1, 2, 3)]),
     }
+    n_reps = {args.asfam_label: len(asfam_files), "DDA (MS-DIAL)": 3, "DIA (MS-DIAL)": 3}
     rows = []
     numbers = {"injections_per_sample": args.injections, "minutes_per_injection": args.minutes_per_injection,
                "hours_per_sample": hours, "asfam_versions": sorted(set(versions))}
     for method, stats in methods.items():
         for key in ("features", "features_with_ms2", "high_score", "ms1_detected", "ms2_only",
-                    "ms2_only_tier_abc", "ms2_only_tier_d"):
+                    "ms2_only_tier_abc", "ms2_only_tier_d", "features_all_tiers"):
             if key not in stats:
                 continue
             mean, sd = stats[key]
             rows.append({"method": method, "quantity": key, "mean": round(mean, 1), "sd": round(sd, 1),
                          "per_injection": round(mean / args.injections, 1),
-                         "per_hour": round(mean / hours, 1), "n_replicates": 3})
+                         "per_hour": round(mean / hours, 1), "n_replicates": n_reps[method]})
             tag = method.split(" ")[0].lower().replace(".", "")
             numbers[f"{tag}_{key}_mean"] = round(mean, 1)
             numbers[f"{tag}_{key}_per_injection"] = round(mean / args.injections, 1)
