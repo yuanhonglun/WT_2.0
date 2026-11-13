@@ -194,6 +194,20 @@ def height_band(h) -> str:
     return "<1e4" if h < 1e4 else ("1e4-1e5" if h < 1e5 else ">=1e5")
 
 
+ERROR_BANDS = ("<5", "5-20", "20-100", ">=100")
+
+
+def error_band(e) -> str:
+    """Band of the absolute error (ppm) of the inferred precursor against the measured one."""
+    try:
+        e = float(e)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(e):
+        return ""
+    return "<5" if e < 5 else ("5-20" if e < 20 else ("20-100" if e < 100 else ">=100"))
+
+
 def run_outcome(matcher: Matcher, feats: dict, selfval: pd.DataFrame, centroid: pd.Series, out: Path) -> dict:
     rows = []
     t0 = time.time()
@@ -232,10 +246,32 @@ def run_outcome(matcher: Matcher, feats: dict, selfval: pd.DataFrame, centroid: 
             for names, t in zip(df[f"{arm}_top5_names"], df["truth_0.01_name_norm"])]
     df.to_csv(out / "annotation_outcome.csv", index=False)
 
-    # ---- summaries -----------------------------------------------------------
+    summ_df, truth, no_truth = summarise_outcome(df)
+    summ_df.to_csv(out / "annotation_outcome_summary.csv", index=False)
+
+    numbers = {"outcome_n_features": len(df), "outcome_n_truth_high_score": len(truth),
+               "outcome_n_truth_no_high_score": len(no_truth)}
+    numbers.update(window_recommendation(summ_df, out))
+    for _, r in summ_df.iterrows():
+        if r["stratum_type"] in ("all", "n_support", "truth_no_high_score"):
+            key = f"outcome_{r['arm']}_{r['stratum_type']}_{str(r['stratum']).replace('>=', 'ge')}"
+            for c in summ_df.columns:
+                if c.startswith(("n_", "frac_")) and pd.notna(r[c]):
+                    numbers[f"{key}_{c}"] = r[c]
+    return numbers
+
+
+def summarise_outcome(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Summary of the per-feature outcome table by arm and stratum (annotation_outcome_summary.csv).
+
+    Strata: all; absolute error of the inferred precursor (ppm); neutral-loss support count;
+    Total score of the truth-arm hit; precursor m/z; MS1 height.  Works on the frame built by
+    run_outcome and on annotation_outcome.csv read back from disk (--resummarise)."""
     truth = df[df["truth_high_score"]]
     no_truth = df[~df["truth_high_score"]]
+    err = truth["abs_error_ppm"].map(error_band)
     strata = [("all", "all", truth)]
+    strata += [("abs_error_ppm", b, truth[err == b]) for b in ERROR_BANDS]
     strata += [("n_support", lvl, truth[truth["support_bin"] == lvl]) for lvl in ("1", "2", "3", ">=4")]
     strata += [("truth_score", b, truth[truth["truth_score_band"] == b]) for b in ("1.4-1.6", "1.6-1.8", ">=1.8")]
     strata += [("mz", b, truth[truth["mz_band"] == b]) for b in ("200-300", "300-500", ">=500")]
@@ -260,19 +296,7 @@ def run_outcome(matcher: Matcher, feats: dict, selfval: pd.DataFrame, centroid: 
                          "n_truth_hit": 0, "n_unconfirmed_high_score_hits": int(no_truth[f"{arm}_high_score"].sum()),
                          "n_features_without_truth_hit": len(no_truth),
                          "frac_unconfirmed_high_score_hits": float(no_truth[f"{arm}_high_score"].mean())})
-    summ_df = pd.DataFrame(summ)
-    summ_df.to_csv(out / "annotation_outcome_summary.csv", index=False)
-
-    numbers = {"outcome_n_features": len(df), "outcome_n_truth_high_score": len(truth),
-               "outcome_n_truth_no_high_score": len(no_truth)}
-    numbers.update(window_recommendation(summ_df, out))
-    for _, r in summ_df.iterrows():
-        if r["stratum_type"] in ("all", "n_support", "truth_no_high_score"):
-            key = f"outcome_{r['arm']}_{r['stratum_type']}_{str(r['stratum']).replace('>=', 'ge')}"
-            for c in summ_df.columns:
-                if c.startswith(("n_", "frac_")) and pd.notna(r[c]):
-                    numbers[f"{key}_{c}"] = r[c]
-    return numbers
+    return pd.DataFrame(summ), truth, no_truth
 
 
 def adopted_nl_window_da() -> float:
@@ -513,9 +537,23 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="debug: only the first N self-validation features")
     ap.add_argument("--recompute-windows", action="store_true",
                     help="no library: rebuild annotation_outcome_windows.csv + the recommendation from the saved summary")
+    ap.add_argument("--resummarise", action="store_true",
+                    help="no library: rebuild annotation_outcome_summary.csv from the saved per-feature annotation_outcome.csv")
     args = ap.parse_args()
     run, out = Path(args.run), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    if args.resummarise:
+        df = pd.read_csv(out / "annotation_outcome.csv", low_memory=False)
+        for c in [c for c in df.columns if c.endswith("_high_score")] + ["truth_high_score"]:
+            df[c] = df[c].astype(str).str.strip().str.lower() == "true"
+        for c in ("support_bin", "truth_score_band", "mz_band", "height_band"):
+            df[c] = df[c].fillna("").astype(str)
+        summ_df, truth, no_truth = summarise_outcome(df)
+        summ_df.to_csv(out / "annotation_outcome_summary.csv", index=False)
+        print(f"annotation_outcome_summary.csv rebuilt from annotation_outcome.csv: {len(df)} features, "
+              f"{len(truth)} with a truth-arm high-scoring hit, {len(summ_df)} summary rows")
+        return 0
 
     if args.recompute_windows:
         summ_df = pd.read_csv(out / "annotation_outcome_summary.csv")

@@ -16,9 +16,17 @@ computed by ``redundancy_ledger.py`` and the processing reports, and writes
   analysis/rep3_full/ablation_hit_overlap.csv   high-score annotation overlap by category / name
   figures/sfig_ablation/sfig_ablation_draft.{svg,pdf,png} + legend.txt
 
+Figure layout (2026-11-12): panel a = candidates vs retained rows (left) and high-score
+annotations per branch (right); panel b = redundancy-marking ledger; panel c = post hoc
+family analysis of the retained MS2-only rows, read from ``<out>/ms2only_families.csv``
+(written by ``redundancy_ledger.py``; nothing is recomputed here).
+
 Every number here is a count on one sample (rep 3), not a mean.
 
 Usage:  python ablation_table.py [--full DIR] [--ms1only DIR] [--out DIR] [--figdir DIR]
+                                 [--families CSV] [--figure-only]
+``--figure-only`` redraws the figure and legend.txt from the same inputs without rewriting
+any analysis CSV or numbers file.
 """
 from __future__ import annotations
 
@@ -193,7 +201,7 @@ def stacked_bar(ax, x, parts, width=0.6):
     return bottom
 
 
-def panel_a(ax, F):
+def panel_a_left(ax, F):
     """Candidates and retained rows per run, stacked by branch / signal class."""
     runs = [("MS1-driven\nonly", "ms1only"), ("Full\npipeline", "full")]
     styles = {
@@ -227,7 +235,7 @@ def panel_a(ax, F):
     despine(ax)
 
 
-def panel_b(ax, F):
+def panel_a_right(ax, F):
     """High-score annotations (Total score >= 1.4 and >= 3 matched peaks) per branch."""
     bars = [
         ("MS1-driven", F["ms1only"]["hs_ms1_driven"], light(MS1_BLUE), MS1_BLUE, None),
@@ -241,9 +249,9 @@ def panel_b(ax, F):
         ax.text(x, v + 8, f"{int(v)}", ha="center", va="bottom", fontsize=8, color=TEXT)
     ax.set_xticks(xs); ax.set_xticklabels([b[0] for b in bars], fontsize=7, rotation=30, ha="right")
     ax.set_xlim(-0.6, 4.85)
-    ax.text(0, -0.50, "MS1-driven\nonly", transform=ax.get_xaxis_transform(), ha="center", va="top",
+    ax.text(0, -0.40, "MS1-driven\nonly", transform=ax.get_xaxis_transform(), ha="center", va="top",
             fontsize=8, linespacing=0.95)
-    ax.text(3.0, -0.50, f"Full pipeline\n(total {int(F['full']['hs_total'])})",
+    ax.text(3.0, -0.40, f"Full pipeline\n(total {int(F['full']['hs_total'])})",
             transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8, linespacing=0.95)
     ax.set_ylabel("High-score annotations")
     ax.set_ylim(0, max(b[1] for b in bars) * 1.25)
@@ -251,7 +259,7 @@ def panel_b(ax, F):
     despine(ax)
 
 
-def panel_c(ax, F):
+def panel_b(ax, F):
     """Redundancy ledger as a waterfall: candidates -> per-sample marks -> alignment marks -> retained."""
     steps = ["Candidates", "Folded at\nalignment", "Isotope", "Adduct", "Spectral", "ISF", "Retained"]
     runs = [("ms1only", SKY_BLUE, "MS1-driven only"), ("full", WT_BLUE, "Full pipeline")]
@@ -287,15 +295,59 @@ def panel_c(ax, F):
     despine(ax)
 
 
-def make_figure(F, figdir: Path):
+FAMILY_BINS = [("1", 1, 1), ("2", 2, 2), ("3", 3, 3), ("4", 4, 4), ("5–9", 5, 9), ("≥10", 10, None)]
+
+
+def family_stats(path: Path) -> dict:
+    """Family-size distribution of the retained MS2-only rows (ms2only_families.csv, as written)."""
+    fam = pd.read_csv(path)
+    sizes = fam.groupby("family_id").size()
+    stored = fam.groupby("family_id")["family_size"].first()
+    if not (sizes == stored).all():
+        raise SystemExit(f"{path}: family_size column disagrees with the family_id grouping")
+    bins = []
+    for lab, lo, hi in FAMILY_BINS:
+        sel = sizes >= lo if hi is None else (sizes >= lo) & (sizes <= hi)
+        bins.append((lab, int(sel.sum())))
+    return {"n_rows": int(len(fam)), "n_families": int(sizes.size),
+            "n_singletons": int((sizes == 1).sum()), "n_families_ge2": int((sizes >= 2).sum()),
+            "n_rows_ge2": int(sizes[sizes >= 2].sum()), "largest": int(sizes.max()), "bins": bins}
+
+
+def panel_c(ax, S):
+    """Post hoc families of the retained MS2-only rows: number of families per family size."""
+    labels = [b[0] for b in S["bins"]]
+    counts = [b[1] for b in S["bins"]]
+    xs = np.arange(len(labels))
+    ax.bar(xs, counts, width=0.7, color=light(MS2ONLY_PURPLE), edgecolor=MS2ONLY_PURPLE, linewidth=LW)
+    for x, v in zip(xs, counts):
+        ax.text(x, v * 1.12, f"{v:,}", ha="center", va="bottom", fontsize=8, color=TEXT)
+    ax.set_yscale("log")
+    ax.set_ylim(10, max(counts) * 4.5)
+    ax.set_xticks(xs); ax.set_xticklabels(labels)
+    ax.set_xlabel("Family size (rows)")
+    ax.set_ylabel("Families (log scale)")
+    ax.set_title("MS2-only families (post hoc)")
+    note = (f"{S['n_rows']:,} rows in {S['n_families']:,} families\n"
+            f"{S['n_singletons']:,} singletons\n"
+            f"{S['n_rows_ge2']:,} rows in {S['n_families_ge2']:,} families of ≥ 2\n"
+            f"largest family: {S['largest']} rows")
+    ax.text(0.98, 0.97, note, transform=ax.transAxes, ha="right", va="top", fontsize=7,
+            color=TEXT, linespacing=1.25)
+    despine(ax)
+
+
+def make_figure(F, figdir: Path, families: dict):
     setup_style()
-    fig = plt.figure(figsize=(7.5, 2.9), constrained_layout=True)
-    fig.set_constrained_layout_pads(w_pad=0.06, h_pad=0.08, wspace=0.10)
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.15, 1.0, 1.25])
-    axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
-    panel_a(axes[0], F); panel_b(axes[1], F); panel_c(axes[2], F)
+    fig = plt.figure(figsize=(7.5, 5.6), constrained_layout=True)
+    fig.set_constrained_layout_pads(w_pad=0.06, h_pad=0.10, wspace=0.10, hspace=0.08)
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 1.0])
+    ax_a1 = fig.add_subplot(gs[0, 0]); ax_a2 = fig.add_subplot(gs[0, 1])
+    ax_b = fig.add_subplot(gs[1, 0]); ax_c = fig.add_subplot(gs[1, 1])
+    panel_a_left(ax_a1, F); panel_a_right(ax_a2, F); panel_b(ax_b, F); panel_c(ax_c, families)
     fig.canvas.draw()
-    for ax, lab in zip(axes, "abc"):
+    # panel a spans the two upper sub-plots and carries one letter
+    for ax, lab in ((ax_a1, "a"), (ax_b, "b"), (ax_c, "c")):
         add_label(fig, ax, lab)
     save_all(fig, figdir / "sfig_ablation_draft.svg")
     plt.close(fig)
@@ -303,10 +355,10 @@ def make_figure(F, figdir: Path):
 
 LEGEND = """Supplementary Figure (draft) | Ablation of the MS2-driven branch on the rep-3 validation set (31 segments, one replicate, positive mode; ASFAMProcessor v{ver}).
 Both runs process the same 31 mzML files with identical parameters; the "MS1-driven only" run sets enable_ms2_driven_branch = false, so stage 1 (MS2-driven detection) is skipped and the MS1-driven branch keeps every MS1 peak. All values are counts on this one sample (counts, not means).
-(a) Candidate features (stages 1 + 1b, before redundancy marking and alignment; "cand.") and rows retained after redundancy marking and alignment ("retained"), stacked by how the row was detected: MS1-detected features from the MS1-driven branch (blue), MS1-detected features from the MS2-driven branch (sky blue), MS2-only features with >= 3 fragments (tiers A–C, purple) and MS2-only features with < 3 fragments (tier D, hatched). MS1-driven only: {c_ms1} candidates -> {r_ms1} retained; full pipeline: {c_full} candidates -> {r_full} retained ({r_full_ms1} MS1-detected, {r_full_ms2} MS2-only).
-(b) High-score library annotations (Total score >= 1.4 and >= 3 matched peaks, lib/lcms/pos.msp) per branch. MS1-driven only: {hs_ms1}; full pipeline: {hs_full} in total = {hs_full_ms1drv} (MS1-driven branch) + {hs_full_ms2drv} (MS2-driven, MS1-detected) + {hs_full_ms2only} (MS2-only). The MS1-driven-only run annotates more features than the full pipeline: in the full run an MS1-detected, MS2-driven feature reported its precursor as the intensity-weighted centroid of the whole 1-Da isolation window, which lies > 0.01 Da from the MS1-only run's ROI centroid for {frac_gt_001} of the {n_pairs_ms2drv} features present in both runs; the two branches also build the MS2 spectrum of such a feature differently. How much of the difference the 0.01 Da library window explains is quantified by re-matching those spectra at wider windows (annotation_outcome.py -> ablation_recovery.csv / ablation_window_scan.csv).
-(c) Redundancy-marking ledger as a waterfall: candidates, minus candidates the stage-7 joiner folded into another row of the same sample (the same compound seen in two overlapping segments or by both branches; {fold_ms1} / {fold_full}), minus aligned rows carrying an isotope, adduct, spectral-duplicate or in-source-fragment mark (stages 4, 5, 5b, 6 within the sample, stage 7.2 across rows; {marks_ms1} / {marks_full} rows), equals retained rows ({r_ms1} / {r_full}). Before the fold the per-sample stages had marked {ps_ms1} / {ps_full} candidates (isotope {iso_ms1} / {iso_full}, adduct {add_ms1} / {add_full}, spectral {spec_ms1} / {spec_full}, ISF {isf_ms1} / {isf_full}); marked candidates folded into their representative are not counted twice. Nothing is deleted at any step; marked rows stay in features.csv with is_duplicate = True. Values are given as MS1-driven only / full pipeline.
-Data: analysis/rep3_full/ablation_table.csv; ledgers analysis/rep3_*/ledger_stages.csv; processing_report.txt of each run.
+(a) Left: candidate features (stages 1 + 1b, before redundancy marking and alignment; "cand.") and rows retained after redundancy marking and alignment ("retained"), stacked by how the row was detected: MS1-detected features from the MS1-driven branch (blue), MS1-detected features from the MS2-driven branch (sky blue), MS2-only features with >= 3 fragments (tiers A–C, purple) and MS2-only features with < 3 fragments (tier D, hatched). MS1-driven only: {c_ms1} candidates -> {r_ms1} retained; full pipeline: {c_full} candidates -> {r_full} retained ({r_full_ms1} MS1-detected, {r_full_ms2} MS2-only). Right: high-score library annotations (Total score >= 1.4 and >= 3 matched peaks, lib/lcms/pos.msp) per branch. MS1-driven only: {hs_ms1}; full pipeline: {hs_full} in total = {hs_full_ms1drv} (MS1-driven branch) + {hs_full_ms2drv} (MS2-driven, MS1-detected) + {hs_full_ms2only} (MS2-only). The MS1-driven-only run annotates more features than the full pipeline: in the full run an MS1-detected, MS2-driven feature reported its precursor as the intensity-weighted centroid of the whole 1-Da isolation window, which lies > 0.01 Da from the MS1-only run's ROI centroid for {frac_gt_001} of the {n_pairs_ms2drv} features present in both runs; the two branches also build the MS2 spectrum of such a feature differently. How much of the difference the 0.01 Da library window explains is quantified by re-matching those spectra at wider windows (annotation_outcome.py -> ablation_recovery.csv / ablation_window_scan.csv).
+(b) Redundancy-marking ledger as a waterfall: candidates, minus candidates the stage-7 joiner folded into another row of the same sample (the same compound seen in two overlapping segments or by both branches; {fold_ms1} / {fold_full}), minus aligned rows carrying an isotope, adduct, spectral-duplicate or in-source-fragment mark (stages 4, 5, 5b, 6 within the sample, stage 7.2 across rows; {marks_ms1} / {marks_full} rows), equals retained rows ({r_ms1} / {r_full}). Before the fold the per-sample stages had marked {ps_ms1} / {ps_full} candidates (isotope {iso_ms1} / {iso_full}, adduct {add_ms1} / {add_full}, spectral {spec_ms1} / {spec_full}, ISF {isf_ms1} / {isf_full}); marked candidates folded into their representative are not counted twice. Nothing is deleted at any step; marked rows stay in features.csv with is_duplicate = True. Values are given as MS1-driven only / full pipeline.
+(c) Post hoc family analysis of the {fam_rows} retained MS2-only rows of the full pipeline (rows within 0.05 min whose spectra have cosine > 0.7 or share at least three fragments are linked): number of families by family size. {fam_n} families, {fam_single} of them singletons; {fam_rows_ge2} rows lie in {fam_ge2} families of two or more and the largest family has {fam_largest} rows.
+Data: analysis/rep3_full/ablation_table.csv; ledgers analysis/rep3_*/ledger_stages.csv; ms2only_families.csv (redundancy_ledger.py); processing_report.txt of each run.
 """
 
 
@@ -317,10 +369,16 @@ def main() -> int:
     ap.add_argument("--ms1only", default=str(REVISION_DIR / "runs" / "rep3_ms1only"))
     ap.add_argument("--out", default=str(REVISION_DIR / "analysis" / "rep3_full"))
     ap.add_argument("--figdir", default=str(REVISION_DIR / "figures" / "sfig_ablation"))
+    ap.add_argument("--families", default=None,
+                    help="ms2only_families.csv of the full run (default: <out>/ms2only_families.csv)")
+    ap.add_argument("--figure-only", action="store_true",
+                    help="redraw the figure and legend.txt only; do not rewrite analysis CSVs or numbers")
     args = ap.parse_args()
     runs = {"full": Path(args.full), "ms1only": Path(args.ms1only)}
     out, figdir = Path(args.out), Path(args.figdir)
     out.mkdir(parents=True, exist_ok=True); figdir.mkdir(parents=True, exist_ok=True)
+    write_tables = not args.figure_only
+    families = family_stats(Path(args.families) if args.families else out / "ms2only_families.csv")
 
     feats, reports, cands, ledgers = {}, {}, {}, {}
     for key, run in runs.items():
@@ -433,7 +491,8 @@ def main() -> int:
     sel = pairs["ms1only_feature_id"].isin(second.index)
     pairs.loc[sel, "unmatched_partner_among_marked_rows"] = pairs.loc[sel, "ms1only_feature_id"].map(second["full_feature_id"])
     pairs.loc[sel, "unmatched_partner_duplicate_type"] = pairs.loc[sel, "unmatched_partner_among_marked_rows"].map(dup_type).fillna("")
-    pairs.to_csv(out / "ablation_overlap_pairs.csv", index=False)
+    if write_tables:
+        pairs.to_csv(out / "ablation_overlap_pairs.csv", index=False)
     ov = {}
     ov["ms1only_rows"] = len(pairs)
     for k in ("precursor_0.01", "quant_ion_0.01", "precursor_0.05", "none"):
@@ -493,7 +552,8 @@ def main() -> int:
     spec_ms1 = feats["ms1only"].set_index("feature_id")["ms2_spectrum"]
     missing["ms1only_ms2_spectrum"] = missing["ms1only_feature_id"].map(spec_ms1)
     missing["full_ms2_spectrum"] = missing["full_feature_id"].map(spec_full).fillna("")
-    missing.to_csv(out / "ablation_missing_hits.csv", index=False)
+    if write_tables:
+        missing.to_csv(out / "ablation_missing_hits.csv", index=False)
     # names
     names_ms1 = set(feats["ms1only"].loc[feats["ms1only"]["high_score"], "name_norm"]) - {""}
     names_full = set(feats["full"].loc[feats["full"]["high_score"], "name_norm"]) - {""}
@@ -508,7 +568,8 @@ def main() -> int:
     ov["hs_names_ms2_only_rows_total"] = len(names_full_ms2)
     ov["hs_names_ms2_only_not_in_ms1only_run"] = len(names_full_ms2 - names_ms1)
     hit_tbl = pd.DataFrame([{"metric": k, "value": v} for k, v in ov.items()])
-    hit_tbl.to_csv(out / "ablation_hit_overlap.csv", index=False)
+    if write_tables:
+        hit_tbl.to_csv(out / "ablation_hit_overlap.csv", index=False)
 
     # ---- the table ---------------------------------------------------------
     sec = [
@@ -547,12 +608,13 @@ def main() -> int:
         table.append({"section": "overlap (MS1-only rows -> full-run partner)", "metric": k,
                       "ms1_only": "", "full": v, "note": ""})
     tbl = pd.DataFrame(table)
-    tbl.to_csv(out / "ablation_table.csv", index=False)
+    if write_tables:
+        tbl.to_csv(out / "ablation_table.csv", index=False)
     pd.set_option("display.width", 200)
     print(tbl.to_string(index=False))
 
     # ---- figure + legend ----------------------------------------------------
-    make_figure(F, figdir)
+    make_figure(F, figdir, families)
     n_pairs = ov.get("pairs_ms2_driven_n", 0)
     legend = LEGEND.format(
         ver=version, c_ms1=f"{F['ms1only']['candidates_total']:,}", r_ms1=f"{F['ms1only']['retained_rows']:,}",
@@ -568,7 +630,10 @@ def main() -> int:
         iso_ms1=f"{F['ms1only']['marked_isotope']:,}", iso_full=f"{F['full']['marked_isotope']:,}",
         add_ms1=F["ms1only"]["marked_adduct"], add_full=F["full"]["marked_adduct"],
         spec_ms1=F["ms1only"]["marked_spectral"], spec_full=F["full"]["marked_spectral"],
-        isf_ms1=F["ms1only"]["marked_isf"], isf_full=F["full"]["marked_isf"])
+        isf_ms1=F["ms1only"]["marked_isf"], isf_full=F["full"]["marked_isf"],
+        fam_rows=f"{families['n_rows']:,}", fam_n=f"{families['n_families']:,}",
+        fam_single=f"{families['n_singletons']:,}", fam_rows_ge2=f"{families['n_rows_ge2']:,}",
+        fam_ge2=families["n_families_ge2"], fam_largest=families["largest"])
     (figdir / "legend.txt").write_text(legend, encoding="utf-8")
 
     numbers = {}
@@ -580,9 +645,12 @@ def main() -> int:
             numbers[f"ablation_{key}_{m}"] = F[key][m]
     for k, v in ov.items():
         numbers[f"ablation_overlap_{k}"] = v
-    update_numbers(out / "numbers_fig4.json", numbers,
-                   source="scripts/ablation_table.py -> analysis/rep3_full/ablation_table.csv")
-    print("written:", out / "ablation_table.csv", figdir / "sfig_ablation_draft.png")
+    if write_tables:
+        update_numbers(out / "numbers_fig4.json", numbers,
+                       source="scripts/ablation_table.py -> analysis/rep3_full/ablation_table.csv")
+        print("written:", out / "ablation_table.csv", figdir / "sfig_ablation_draft.png")
+    else:
+        print("figure only (no analysis file rewritten):", figdir / "sfig_ablation_draft.png")
     return 0
 
 

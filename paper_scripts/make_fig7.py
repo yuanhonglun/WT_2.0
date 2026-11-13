@@ -23,8 +23,9 @@ revision_260722/scripts/analyze_cancer.py.  Panels:
      (Supplementary Fig. 4, file sfig4_outlier_removed_published_rule).
   e  ROC curves of the re-derived classifiers (analysis/cancer/redo_predictions_*.csv):
      e1 LC vs BLD, held-out internal validation (14 vs 6) - the main result;
-     e2 LC vs HC and e3 LC vs non-LC, exploratory and batch-confounded (HC sera were
-     collected and run as a separate batch).  In every ROC panel the five models are drawn
+     e2 LC vs HC and e3 LC vs non-LC, exploratory and confounded by the HC difference (the HC
+     sera differ systematically from the patient sera; all sera were extracted and acquired
+     together, see Methods).  In every ROC panel the five models are drawn
      thin, KNN thick (the model pre-specified in the published figure; it is NOT the
      best-AUC model on the validation set, which would be a selection on held-out data),
      and the published 20-metabolite KNN scores restricted to the same participants as a
@@ -773,7 +774,7 @@ def main(argv=None) -> None:
         assert (pub_scores.reindex(preds["sample"])["y"].to_numpy(int) == preds["y"].to_numpy(int)).all(), f"{comp_name}: labels differ between redo and published files"
         n_case, n_ctrl = int(preds["y"].sum()), int((1 - preds["y"]).sum())
         subtitle = f"panel of {panel_size} transition{'s' if panel_size != 1 else ''}; trained on {int(redo[(redo['comparison'] == comp_name) & (redo['dataset'] == 'train_insample')]['n'].iloc[0])}"
-        legend_title = f"LC n = {n_case} vs {ctrl} n = {n_ctrl}" + ("" if comp_name == "LC_vs_BLD" else "\nbatch-confounded")
+        legend_title = f"LC n = {n_case} vs {ctrl} n = {n_ctrl}" + ("" if comp_name == "LC_vs_BLD" else "\nconfounded by the HC difference")
         cyfra = None
         if comp_name == "LC_vs_BLD":
             # clinical Cyfra21-1 alone on the same held-out participants (recorded for patients only)

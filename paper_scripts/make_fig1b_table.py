@@ -70,12 +70,12 @@ ROWS = [
     # Fig. 5 comparison, means of three technical replicates at S/N >= 3 (2026-11-04):
     # DDA and DIA from the MS-DIAL exports (unchanged), WT 2.0 from the three replicates
     # re-processed with ASFAMProcessor 1.4.261103 (MS2-only tier D excluded).
-    # High-score annotations = Total score >= 1.4 with >= 3 matched library peaks, the
-    # rule used throughout the paper (figures/fig5/numbers_fig5.json, analysis/fig5_v4/).
+    # High-score annotations = Total score >= 1.4 alone, the criterion drawn in Fig. 5c
+    # (figures/fig5/numbers_fig5.json keys fig5_*_high_score: DDA 1,119, DIA 932, WT 2.0 1,999).
     ("Features observed",
      [["5,116"], ["5,119"], ["13,594"]]),
     ("High-score annotations",
-     [["817"], ["763"], ["522"]]),
+     [["1,119"], ["932"], ["1,999"]]),
 ]
 
 # ---- geometry (pt, SVG user units) ------------------------------------------

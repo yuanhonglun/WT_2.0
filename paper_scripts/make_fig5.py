@@ -270,17 +270,17 @@ def main() -> None:
     style_axis(axB); panel_letter(axB, "b")
 
     # ===================== Panel c: high-scoring annotations =====================
-    # Drawn with the criterion used throughout the paper (Total score >= 1.4 and >= 3 matched
-    # library peaks; 2026-11-04). The counts at Total score >= 1.4 alone (the criterion of the
-    # submitted figure) stay in the numbers file as fig5_*_high_score.
-    meanC = [ms(wt["high_strict"])[0], ms(dda["high_strict"])[0], ms(dia["high_strict"])[0]]
-    sdC = [ms(wt["high_strict"])[1], ms(dda["high_strict"])[1], ms(dia["high_strict"])[1]]
+    # Drawn with the criterion stated in the Fig. 5 legend: Total score >= 1.4, one top-ranked
+    # library match per feature. The counts that additionally require >= 3 matched library peaks
+    # stay in the numbers file as fig5_*_high_score_strict.
+    meanC = [ms(wt["high"])[0], ms(dda["high"])[0], ms(dia["high"])[0]]
+    sdC = [ms(wt["high"])[1], ms(dda["high"])[1], ms(dia["high"])[1]]
     axC.bar(x, meanC, BW, color=FILL, edgecolor=EDGE, linewidth=1.0, yerr=sdC, error_kw=ERRKW)
-    for xi, values, edge in zip(x, [wt["high_strict"], dda["high_strict"], dia["high_strict"]], EDGE):
+    for xi, values, edge in zip(x, [wt["high"], dda["high"], dia["high"]], EDGE):
         replicate_points(axC, xi, values, edge)
     axC.set_ylim(0, (np.array(meanC) + np.array(sdC)).max() * 1.20)
     bar_labels(axC, x, meanC, [f"{v:,.0f}" for v in meanC], errs=sdC)
-    axC.set_ylabel("Annotations (score ≥ 1.4,\n≥ 3 matched peaks)")
+    axC.set_ylabel("Annotations (Total score ≥ 1.4)")
     axC.set_title("High-scoring annotations", fontsize=8, fontweight="bold", pad=4)
     axC.set_xticks(x); axC.set_xticklabels(METHODS)
     style_axis(axC); panel_letter(axC, "c")

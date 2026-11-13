@@ -53,9 +53,7 @@ def asfam_counts(path: Path) -> dict:
         # headline counts use MS2-only tiers A to C only; tier D rows are reported separately
         a = a[a["ms2_only_tier"].fillna("").astype(str).str.strip() != "D"]
     ts = pd.to_numeric(a["total_score"], errors="coerce")
-    high = ts >= HIGH_SCORE
-    if "n_matched" in a.columns:
-        high &= pd.to_numeric(a["n_matched"], errors="coerce") >= 3
+    high = ts >= HIGH_SCORE          # the Fig. 5c criterion: Total score >= 1.4, one top-ranked match per feature
     out = {
         "features": len(a),
         "features_with_ms2": int((a["n_fragments"].astype(float) > 0).sum()),
@@ -76,9 +74,7 @@ def msdial_counts(path: Path) -> dict:
     m = m[pd.to_numeric(m["S/N"], errors="coerce") >= SN_FLOOR]
     msms = m["MSMS spectrum"].notna() & (m["MSMS spectrum"].astype(str).str.strip() != "")
     ts = pd.to_numeric(m["Total score"], errors="coerce")
-    high = ts >= HIGH_SCORE
-    if "Matched peaks count" in m.columns:
-        high &= pd.to_numeric(m["Matched peaks count"], errors="coerce") >= 3
+    high = ts >= HIGH_SCORE          # the Fig. 5c criterion (same as for the ASFAMProcessor exports)
     return {"features": len(m), "features_with_ms2": int(msms.sum()), "high_score": int(high.sum())}
 
 
