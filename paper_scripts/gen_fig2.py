@@ -168,8 +168,11 @@ COL = [ML, ML + W1 + GX, ML + 2 * (W1 + GX)]
 CXc = [c + W1 / 2 for c in COL]
 
 R1_Y, R1_H = 0.690, 0.295                         # row 1 (bottom-y, height)
-DE_Y, DE_H = 0.342, 0.310                         # dedup band
-R3_Y, R3_H = 0.022, 0.282                         # row 3
+# Compact deduplication / annotation / alignment blocks. The canvas is unchanged; the empty
+# band left below row 3 is cropped when the figure is saved (CROP_Y).
+DE_Y, DE_H = 0.456, 0.196                         # dedup band
+R3_Y, R3_H = 0.220, 0.198                         # row 3
+CROP_Y = R3_Y - 0.022                             # figure fraction cut off at the bottom
 W3 = (CW - GX) / 2
 COL3 = [ML, ML + W3 + GX]
 CX3 = [c + W3 / 2 for c in COL3]
@@ -204,8 +207,6 @@ for i in range(nwin):
                            fc=C_MS2_F, ec=C_MS2, lw=0.7, zorder=6))
 T(ix + 0.006, st_b - 0.006, "HR-MRM MS2  ·  1 Da stepped windows", size=7,
   color=C_MS2_D, va="top")
-T(ix + 0.006, st_b - 0.022, "this study: 31 segments x 30 windows", size=6,
-  color=SUBIN, style="italic", va="top")
 
 # =============================================================================
 # STAGE 2 - Feature detection (MS1/MS2 dual-driven)
@@ -220,16 +221,14 @@ ex, ey = ix + 0.004, top - 0.086
 axes_frame(ex, ey, EW, EH)
 for col, amp, sig in [(C_MS2, 0.94, 0.15), (C_MS2_D, 0.72, 0.17), (C_MS2_L, 0.85, 0.14)]:
     eic(ex, ey, EW, EH, 0.5, sig, amp, col, lw=0.9)
-T(ex + EW / 2, ey - 0.006, "co-eluting product ions", size=6, color=C_MS2_D,
-  ha="center", va="top")
+T(ix + 0.002, ey - 0.006, "co-eluting product ions", size=6, color=C_MS2_D,
+  ha="left", va="top")
 arrow(ex + EW + 0.006, ey + EH / 2, ex + EW + 0.030, ey + EH / 2, color=C_MS2, scale=8)
 axes_frame(SPX, ey, SPW, EH)
 sticks(SPX, ey, SPW, EH,
        [(0.14, 0.55), (0.3, 0.95), (0.46, 0.35), (0.62, 0.72), (0.8, 0.48)],
        C_MS2, lw=1.0)
 T(SPX + 0.002, ey - 0.006, "MS2 spectrum", size=6, color=C_MS2_D, va="top")
-T(ix, top - 0.100, "+ 2nd-pass recall (+/-2 cyc) recovers weak product ions",
-  size=6, color=SUBIN, style="italic", va="top")
 my = top - 0.150
 T(ix, my + 0.004, "MS1-driven", size=8, weight="bold", color=C_MS1, va="top")
 ey2 = my - 0.054
@@ -245,7 +244,7 @@ axes_frame(SPX, ey2, SPW, EH)
 sticks(SPX, ey2, SPW, EH,
        [(0.18, 0.6), (0.36, 0.92), (0.56, 0.4), (0.8, 0.66)], C_MS1, lw=1.0)
 T(SPX + 0.002, ey2 - 0.006, "assigned MS2", size=6, color=C_MS1, va="top")
-T(ix + iw / 2, iy + 0.004, "union -> candidate features", size=8, weight="bold",
+T(ix + iw / 2, iy + 0.004, "union → candidate features", size=8, weight="bold",
   color=INK, ha="center", va="bottom")
 
 # =============================================================================
@@ -255,8 +254,6 @@ ix, iy, iw, ih = draw_box(COL[2], R1_Y, W1, R1_H, "Precursor m/z assignment")
 top = iy + ih
 T(ix, top - 0.004, "First source that succeeds, in order:", size=7.5,
   weight="bold", color=INK, va="top")
-T(ix, top - 0.018, "(MS1-driven features carry their MS1 peak m/z directly)", size=6,
-  color=SUBIN, style="italic", va="top")
 
 # steps 1-2: an MS1 peak is matched to the product-ion peak group
 GW, GH = 0.044, 0.036
@@ -271,10 +268,8 @@ eic(mx1, g_y, GW, GH, 0.5, 0.16, 0.92, C_MS1, lw=1.0, fill=True)
 T(mx1 + GW / 2, g_y - 0.005, "MS1 peak", size=6, color=C_MS1, ha="center", va="top")
 arrow(mx1 - 0.003, g_y + GH * 0.55, ix + 0.002 + GW + 0.003, g_y + GH * 0.55, color=C_MS1, scale=8)
 tx = mx1 + GW + 0.010
-T(tx, top - 0.034, "1  strict MS1 peak", size=7, weight="bold", color=C_MS1, va="top")
-T(tx + 0.013, top - 0.047, "exclusive, 0.01 Da / 0.05 min", size=6, color=SUBIN, va="top")
-T(tx, top - 0.062, "2  relaxed MS1 peak", size=7, weight="bold", color=C_MS1, va="top")
-T(tx + 0.013, top - 0.075, "wider tolerance, weak trace", size=6, color=SUBIN, va="top")
+T(tx, top - 0.038, "1  strict MS1 peak", size=7, weight="bold", color=C_MS1, va="top")
+T(tx, top - 0.058, "2  relaxed MS1 peak", size=7, weight="bold", color=C_MS1, va="top")
 
 # step 3: neutral-loss consensus (MS2-only)
 n_y = top - 0.138
@@ -290,10 +285,8 @@ for fxp, fhp in [(0.10, 0.78), (0.22, 0.50), (0.34, 0.90), (0.48, 0.62)]:
 ax.add_line(Line2D([prec_x, prec_x], [n_y, prec_top], color=C_INF, lw=1.6, zorder=6))
 T(nx + 0.28 * nw, n_y - 0.005, "product ions", size=6, color=C_MS2_D, ha="center", va="top")
 T(prec_x, n_y - 0.005, "inferred", size=6, color=C_INF, ha="center", va="top")
-T(nx + 0.62 * nw, n_y + 0.84 * nh, "+ NL, vote", size=6, color=INK, ha="center", va="bottom")
-T(tx, top - 0.100, "3  neutral-loss consensus", size=7, weight="bold", color=C_INF, va="top")
-T(tx + 0.013, top - 0.113, "vote across product ions;", size=6, color=SUBIN, va="top")
-T(tx + 0.013, top - 0.124, "support count -> tier", size=6, color=SUBIN, va="top")
+T(tx, top - 0.106, "3  neutral-loss consensus", size=7, weight="bold", color=C_INF, va="top")
+T(tx + 0.013, top - 0.119, "vote across product ions", size=6, color=SUBIN, va="top")
 
 # step 4: isolation-window centroid fallback (low confidence)
 w_y = top - 0.192
@@ -303,13 +296,10 @@ ax.add_patch(Rectangle((nx + 0.18 * ww, w_y + 0.002), 0.64 * ww, wh * 0.55,
                        fc=C_INF_F, ec=C_INF, lw=0.8, zorder=5))
 cx_w = nx + 0.18 * ww + 0.64 * ww * 0.56
 ax.add_line(Line2D([cx_w, cx_w], [w_y, w_y + wh * 0.95], color=C_INF, lw=1.6, zorder=6))
-T(nx, w_y - 0.005, "1 Da window, +/-0.5 Da centroid", size=6,
+T(nx, w_y - 0.005, "1 Da isolation window", size=6,
   color=C_INF, ha="left", va="top")
-T(tx, top - 0.162, "4  window centroid", size=7, weight="bold", color=C_INF, va="top")
-T(tx + 0.013, top - 0.175, "fallback; low confidence", size=6, color=SUBIN,
-  style="italic", va="top")
-T(ix, iy + 0.004, "MS2-only = sources 3-4  ·  source and tier exported per feature", size=6,
-  color=SUBIN, style="italic", va="bottom")
+T(tx, top - 0.166, "4  window centroid", size=7, weight="bold", color=C_INF, va="top")
+T(tx + 0.013, top - 0.179, "low-confidence fallback", size=6, color=SUBIN, va="top")
 
 # =============================================================================
 # STAGE 4 - Deduplication (full-width band, four sub-cards)
@@ -317,18 +307,21 @@ T(ix, iy + 0.004, "MS2-only = sources 3-4  ·  source and tier exported per feat
 ix, iy, iw, ih = draw_box(ML, DE_Y, CW, DE_H, "Deduplication")
 top = iy + ih
 T(ML + CW / 2, top - 0.002,
-  "four sequential steps  ·  isotope / adduct / ISF gated by co-elution "
-  "(close RT + high EIC r)  ·  spectral-duplicate by MS2 cosine  ·  "
-  "relations are marked, nothing deleted",
+  "four sequential steps  ·  relations are marked, nothing is deleted",
   size=7.5, color=SUBIN, style="italic", ha="center", va="top")
 cpad = 0.008
 cgap = 0.012
 cx0 = ML + cpad
 cardW = (CW - 2 * cpad - 3 * cgap) / 4
-cardTop = top - 0.028
-cardBot = iy + 0.006
+cardTop = top - 0.024
+cardBot = iy + 0.004
 cardH = cardTop - cardBot
 cardX = [cx0 + i * (cardW + cgap) for i in range(4)]
+# inside a card: main graphic on the left, co-elution evidence on the right (side by side)
+G_X, G_W = 0.014, 0.108          # main graphic: x offset in the card, width
+G_Y, G_H = 0.020, 0.048          # baseline above cardBot, height
+M_X, M_W = 0.146, 0.060          # co-elution mini: x offset in the card, width
+M_Y, M_H = 0.034, 0.034          # baseline above cardBot, height
 
 def card(i, num, name):
     x = cardX[i]
@@ -341,19 +334,19 @@ def card(i, num, name):
     T(x + 0.019, cardTop - 0.013, name, size=7.5, weight="bold", color=INK, va="center")
     return x
 
-def coelution_mini(x, w, ca, cb):
+def coelution_mini(x, ca, cb):
     """Two overlapping MS1 EIC peaks (shared RT apex) - the co-elution evidence
-    common to isotope / adduct / ISF."""
-    gy, gh = cardBot + 0.056, 0.036
-    axes_frame(x, gy, w, gh, yaxis=False)
-    eic(x, gy, w, gh, 0.5, 0.17, 0.95, ca, lw=0.9)
-    eic(x, gy, w, gh, 0.5, 0.17, 0.62, cb, lw=0.9)
-    T(x + w + 0.006, gy + gh / 2 + 0.005, "co-elute", size=6, color=SUBIN, va="center")
-    T(x + w + 0.006, gy + gh / 2 - 0.007, "EIC r>=0.9", size=6, color=SUBIN, va="center")
+    common to isotope / adduct / ISF. x = left edge of the card."""
+    gx, gy = x + M_X, cardBot + M_Y
+    axes_frame(gx, gy, M_W, M_H, yaxis=False)
+    eic(gx, gy, M_W, M_H, 0.5, 0.17, 0.95, ca, lw=0.9)
+    eic(gx, gy, M_W, M_H, 0.5, 0.17, 0.62, cb, lw=0.9)
+    T(gx + M_W / 2, gy - 0.005, "co-elute", size=6, color=SUBIN, ha="center", va="top")
+    T(gx + M_W / 2, gy - 0.016, "EIC r ≥ 0.9", size=6, color=SUBIN, ha="center", va="top")
 
 # 1 Isotope
 x = card(0, 1, "Isotope")
-gx, gy, gw, gh = x + 0.016, cardTop - 0.098, cardW - 0.032, 0.066
+gx, gy, gw, gh = x + G_X, cardBot + G_Y, G_W, G_H
 axes_frame(gx, gy, gw, gh)
 ax.add_line(Line2D([gx + 0.20 * gw] * 2, [gy, gy + 0.95 * gh], color=C_MS1, lw=1.5, zorder=6))
 for fxp, fhp in [(0.5, 0.42), (0.8, 0.17)]:
@@ -364,13 +357,11 @@ ax.annotate("", xy=(gx + 0.5 * gw, gy + gh * 1.05), xytext=(gx + 0.2 * gw, gy + 
             arrowprops=dict(arrowstyle="<->", color=SUBIN, lw=0.6, shrinkA=0, shrinkB=0,
                             mutation_scale=5), zorder=6)
 T(gx + 0.35 * gw, gy + gh * 1.10, "+1.003 (13C)", size=6, color=SUBIN, ha="center", va="bottom")
-coelution_mini(x + 0.016, 0.084, C_MS1, NEUTRAL)
-T(x + cardW / 2, cardBot + 0.016, "mark isotope relation", size=7, weight="bold",
-  color=INK, ha="center", va="center")
+coelution_mini(x, C_MS1, NEUTRAL)
 
 # 2 Adduct
 x = card(1, 2, "Adduct")
-gx, gy, gw, gh = x + 0.016, cardTop - 0.098, cardW - 0.032, 0.066
+gx, gy, gw, gh = x + G_X, cardBot + G_Y, G_W, G_H
 axes_frame(gx, gy, gw, gh, yaxis=False)
 xh, xna = gx + 0.24 * gw, gx + 0.80 * gw
 ax.add_line(Line2D([xh, xh], [gy, gy + 0.90 * gh], color=C_MS1, lw=1.5, zorder=6))
@@ -381,79 +372,66 @@ ax.annotate("", xy=(xna, gy + gh * 1.05), xytext=(xh, gy + gh * 1.05),
 T((xh + xna) / 2, gy + gh * 1.10, "Δm/z 21.98", size=6, color=SUBIN, ha="center", va="bottom")
 T(xh, gy - 0.005, "[M+H]+", size=6, color=C_MS1, ha="center", va="top")
 T(xna, gy - 0.005, "[M+Na]+", size=6, color=NEUTRAL, ha="center", va="top")
-coelution_mini(x + 0.016, 0.084, C_MS1, NEUTRAL)
-T(x + cardW / 2, cardBot + 0.016, "mark adduct relation", size=7, weight="bold",
-  color=INK, ha="center", va="center")
+coelution_mini(x, C_MS1, NEUTRAL)
 
 # 3 Spectral duplicate
 x = card(2, 3, "Spectral duplicate")
-gx, gy, gw, gh = x + 0.014, cardTop - 0.106, cardW - 0.052, 0.080
+gx, gy, gw, gh = x + G_X, cardBot + 0.010, G_W, 0.068
 dpk = [(0.16, 0.9), (0.36, 0.5), (0.56, 0.72), (0.8, 0.34)]
 mirror(gx, gy, gw, gh, dpk, [(a, b * 0.95) for a, b in dpk], C_MS1, NEUTRAL,
        ax_color=NEUTRAL, ax_lw=0.9, ax_z=7)
-T(gx + gw + 0.006, gy + gh * 0.74, "cos", size=6, color=SUBIN, va="center")
-T(gx + gw + 0.006, gy + gh * 0.52, ">=0.85", size=6, color=SUBIN, va="center")
-T(gx + gw + 0.006, gy + gh * 0.30, ">=3 pk", size=6, color=SUBIN, va="center")
-T(x + cardW / 2, cardBot + 0.050, "close RT · |Δm/z| <= 0.5", size=6,
-  color=SUBIN, ha="center", va="center")
-T(x + cardW / 2, cardBot + 0.016, "mark duplicate relation", size=7,
-  weight="bold", color=INK, ha="center", va="center")
+T(x + M_X + M_W / 2, gy + gh * 0.60, "MS2 cosine", size=6, color=SUBIN, ha="center", va="center")
+T(x + M_X + M_W / 2, gy + gh * 0.40, "≥ 0.85", size=6, color=SUBIN, ha="center", va="center")
 
 # 4 In-source fragmentation
 x = card(3, 4, "In-source fragmentation")
-gx, gy, gw, gh = x + 0.014, cardTop - 0.096, cardW - 0.028, 0.060
+gx, gy, gw, gh = x + G_X, cardBot + G_Y, G_W, 0.056
 ymid = gy + gh / 2
 ax.add_line(Line2D([gx, gx + gw], [ymid, ymid], color=NEUTRAL, lw=0.9, zorder=7))
 ax.add_line(Line2D([gx, gx], [gy, gy + gh], color=NEUTRAL, lw=0.9, zorder=7))
-shared = 0.56
-for fxp, fhp in [(0.24, 0.5), (0.40, 0.66), (shared, 0.9), (0.78, 0.34), (0.92, 0.56)]:
+shared = 0.68
+for fxp, fhp in [(0.42, 0.5), (0.54, 0.66), (shared, 0.9), (0.84, 0.34), (0.95, 0.56)]:
     col = INK if fxp == shared else C_MS1
     ax.add_line(Line2D([gx + fxp * gw] * 2, [ymid, ymid + fhp * (gh / 2)], color=col, lw=1.1, zorder=6))
-for fxp, fhp in [(0.24, 0.46), (0.40, 0.60), (shared, 0.86)]:
+for fxp, fhp in [(0.42, 0.46), (0.54, 0.60), (shared, 0.86)]:
     col = INK if fxp == shared else NEUTRAL
     ax.add_line(Line2D([gx + fxp * gw] * 2, [ymid, ymid - fhp * (gh / 2)], color=col, lw=1.1, zorder=6))
 ax.add_line(Line2D([gx + shared * gw] * 2, [gy, gy + gh], color=INK, lw=0.5,
                    ls=(0, (1.4, 1.4)), alpha=0.7, zorder=5))
 T(gx + 0.004, ymid + 0.52 * (gh / 2), "parent", size=6, color=C_MS1, va="center")
 T(gx + 0.004, ymid - 0.52 * (gh / 2), "child", size=6, color=NEUTRAL, va="center")
-T(gx + shared * gw, gy - 0.005, "m/z 287 = child precursor", size=6, color=INK,
+T(gx + shared * gw, gy - 0.005, "child precursor", size=6, color=INK,
   ha="center", va="top")
-coelution_mini(x + 0.014, 0.078, C_MS1, NEUTRAL)
-T(x + cardW / 2, cardBot + 0.016, "mark ISF relation", size=7,
-  weight="bold", color=INK, ha="center", va="center")
+coelution_mini(x, C_MS1, NEUTRAL)
 
 # =============================================================================
 # STAGE 5 - Annotation (mirror plot + two-tier confidence)
 # =============================================================================
 ix, iy, iw, ih = draw_box(COL3[0], R3_Y, W3, R3_H, "Annotation")
 top = iy + ih
-T(ix, top - 0.004, "Spectral-library matching  ·  mirror match", size=8,
+T(ix, top - 0.004, "Spectral-library matching", size=8,
   weight="bold", color=INK, va="top")
-mx, my, mw, mh = ix + 0.006, iy + 0.028, iw * 0.52, 0.166
-q = [(0.10, 0.5), (0.24, 0.95), (0.4, 0.42), (0.56, 0.8), (0.72, 0.35), (0.88, 0.6)]
-r = [(0.10, 0.45), (0.24, 0.9), (0.4, 0.3), (0.56, 0.75), (0.72, 0.5), (0.88, 0.55)]
-mirror(mx, my, mw, mh, q, r, C_MS1, C_MS2, matched=[0.10, 0.24, 0.56, 0.88])
+mx, my, mw, mh = ix + 0.006, iy + 0.016, iw * 0.50, ih - 0.040
+# sticks start right of the "query" / "reference" labels so that no stick crosses them
+q = [(0.30, 0.5), (0.42, 0.95), (0.54, 0.42), (0.66, 0.8), (0.78, 0.35), (0.92, 0.6)]
+r = [(0.30, 0.45), (0.42, 0.9), (0.54, 0.3), (0.66, 0.75), (0.78, 0.5), (0.92, 0.55)]
+mirror(mx, my, mw, mh, q, r, C_MS1, C_MS2, matched=[0.30, 0.42, 0.66, 0.92])
 T(mx + 0.004, my + mh - 0.004, "query", size=7, color=C_MS1, va="top")
 T(mx + 0.004, my + 0.004, "reference", size=7, color=C_MS2_D, va="bottom")
-T(mx + mw / 2, my - 0.010, "m/z", size=6, color=SUBIN, ha="center", va="top")
+T(mx + mw / 2, my - 0.004, "m/z", size=6, color=SUBIN, ha="center", va="top")
 tx = mx + mw + 0.024
-T(tx, my + mh - 0.006, "composite score =", size=8, weight="bold", color=INK, va="top")
-T(tx + 0.006, my + mh - 0.024, "(√WDP + √SDP + √RDP)/3", size=7.5, color=INK, va="top")
-T(tx + 0.028, my + mh - 0.040, "+ Matched%", size=7.5, color=INK, va="top")
-ax.add_patch(FancyBboxPatch((tx, my + 0.045), iw - (tx - ix) - 0.006, 0.058,
+T(tx, top - 0.024, "composite score =", size=8, weight="bold", color=INK, va="top")
+T(tx + 0.006, top - 0.042, "(√WDP + √SDP + √RDP)/3", size=7.5, color=INK, va="top")
+T(tx + 0.028, top - 0.058, "+ Matched%", size=7.5, color=INK, va="top")
+by = iy + 0.004
+ax.add_patch(FancyBboxPatch((tx, by), iw - (tx - ix) - 0.006, 0.052,
                             boxstyle="round,pad=0,rounding_size=0.005",
                             mutation_aspect=1 / ASPECT, fc=C_MS1_F, ec=C_MS1,
                             lw=0.8, zorder=5))
-T(tx + 0.008, my + 0.090, "high-scoring:", size=7.5, weight="bold",
+T(tx + 0.008, by + 0.040, "high-scoring:", size=7.5, weight="bold",
   color=C_MS1, va="center")
-T(tx + 0.008, my + 0.074, "Total score >= 1.4 AND", size=7, color=INK, va="center")
-T(tx + 0.008, my + 0.058, ">= 3 matched peaks", size=7, color=INK, va="center")
-T(tx, my + 0.032, "precursor window by m/z source", size=6.5,
-  color=SUBIN, style="italic", va="center")
-T(tx, my + 0.018, "top-5 hits / feature", size=6.5,
-  color=SUBIN, style="italic", va="center")
-T(tx, my + 0.004, "export MSP / MGF", size=6.5,
-  color=SUBIN, style="italic", va="center")
+T(tx + 0.008, by + 0.026, "Total score ≥ 1.4 and", size=7, color=INK, va="center")
+T(tx + 0.008, by + 0.012, "≥ 3 matched peaks", size=7, color=INK, va="center")
 
 # =============================================================================
 # STAGE 6 - Alignment & export (v1.4 identity rule)
@@ -468,7 +446,7 @@ cols = [0.10, 0.30, 0.52, 0.74, 0.92]
 present = [[1, 1, 1, 0, 1], [1, 1, 1, 1, 1], [1, 0, 1, 1, 1]]
 jit = [[0.0, 0.01, -0.01, 0, 0.008], [0.006, -0.008, 0.004, -0.006, 0.0],
        [-0.006, 0, 0.008, 0.006, -0.004]]
-ry = [top - 0.036, top - 0.058, top - 0.080]
+ry = [top - 0.032, top - 0.049, top - 0.066]
 for ci, c in enumerate(cols):
     X = lat_x + c * lat_w
     ax.add_line(Line2D([X, X], [ry[2] - 0.006, ry[0] + 0.006], color=RULE,
@@ -486,16 +464,10 @@ for i, y in enumerate(ry):
                        linewidths=0.7, zorder=7)
 T(lat_x + lat_w + 0.010, ry[1], "aligned\nfeature\ntable", size=7, color=C_MS1,
   ha="left", va="center")
-RULE_LINES = [
-    "identity decided per pair from the evidence each side carries:",
-    "exact precursor + spectrum must not contradict / spectrum only /",
-    "cross-route with window containment and a chemical anchor;",
-    "complete-link clustering; nothing deleted, redundancy marked",
-]
-for k, line in enumerate(RULE_LINES):
-    T(ix, ry[2] - 0.016 - k * 0.0125, line, size=6, color=SUBIN, style="italic", va="top")
-ey = iy + 0.024
-fw2, fh2, fgap = 0.052, 0.034, 0.028
+T(ix, ry[2] - 0.012, "identity decided pairwise from precursor and spectrum evidence",
+  size=6, color=SUBIN, style="italic", va="top")
+ey = iy + 0.016
+fw2, fh2, fgap = 0.046, 0.028, 0.030
 files = [("features.csv", C_MS1_F, C_MS1), (".mgf", C_MS2_F, C_MS2_D), (".msp", C_MS2_F, C_MS2_D)]
 fx0 = ix + 0.020
 for k, (nm, ff, fs) in enumerate(files):
@@ -535,8 +507,10 @@ def main() -> None:
     args = parser.parse_args()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    from matplotlib.transforms import Bbox
+    crop = Bbox.from_extents(0, CROP_Y * FH, FW, FH)      # inches; drops the empty band below row 3
     for ext in ("svg", "pdf", "png"):
-        fig.savefig(out / f"Fig 2.{ext}", dpi=300, facecolor="white")
+        fig.savefig(out / f"Fig 2.{ext}", dpi=300, facecolor="white", bbox_inches=crop)
     (out / "legend_fig2.txt").write_text(LEGEND, encoding="utf-8")
     print("wrote Fig 2.svg / .pdf / .png and legend_fig2.txt to", out)
 

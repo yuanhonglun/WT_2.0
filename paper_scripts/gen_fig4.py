@@ -315,13 +315,15 @@ def panel_e(ax, inf):
         x = np.sort(sub["abs_error_ppm"].to_numpy()); y = np.arange(1, len(x) + 1) / len(x) * 100
         ax.step(x, y, where="post", color=SUPPORT_S[lvl], linewidth=LW,
                 label=f"{SUPPORT_LABEL[lvl]} (n = {len(sub)})")
-    ax.set_xscale("log"); ax.set_xlim(0.1, 1e4); ax.set_ylim(0, 100)
-    ax.axvline(20, color=GRAY, linestyle="--", linewidth=LW)
+    # headroom above 100% (as in panel f) so the legend never sits on a curve
+    ax.set_xscale("log"); ax.set_xlim(0.1, 1e4); ax.set_ylim(0, 140)
+    ax.set_yticks([0, 20, 40, 60, 80, 100])
+    ax.plot([20, 20], [0, 100], color=GRAY, linestyle="--", linewidth=LW)
     ax.text(24, 4, "20 ppm", color=GRAY, ha="left")
     ax.set_xlabel("|inferred − true m/z| (ppm)"); ax.set_ylabel("Cumulative %")
     ax.set_title(f"NL-consensus self-validation (n = {len(inf)})")
-    ax.legend(loc="upper left", handlelength=1.0, handletextpad=0.4, labelspacing=0.25, fontsize=6.5,
-              borderaxespad=0.2)
+    ax.legend(loc="upper left", ncol=2, handlelength=0.9, handletextpad=0.4, columnspacing=0.8,
+              labelspacing=0.25, fontsize=6.5, borderaxespad=0.2)
     despine(ax)
 
 

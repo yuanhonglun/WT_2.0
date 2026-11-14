@@ -193,7 +193,7 @@ def build_panel_b(measure) -> tuple[str, float, list[str]]:
         w = measure(name, True) + 14.0
         parts.append(rounded_rect(cx - w / 2, y + (HEADER_H - chip_h) / 2, w, chip_h, 2.0, f"pb{i}"))
         parts.append(text_el(cx, y + HEADER_H / 2 + 2.85, name, bold=True, anchor="middle"))
-    parts.append(text_el(X0 + 6.0, y + HEADER_H / 2 + 2.85, "Property (comparison data sets)", bold=False))
+    parts.append(text_el(X0 + 6.0, y + HEADER_H / 2 + 2.85, "Property (methods as used in this study)", bold=False))
     y += HEADER_H + ROW_GAP + 1.0
 
     for label, cells in ROWS:

@@ -250,9 +250,10 @@ def panel_d(ax, sheets):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylabel("Total score")
-    ax.set_ylim(0, 2.45)
+    ax.set_ylim(0, 2.6)
+    # two-line title: the one-line title is wider than the axes and ran across the y axis
     leg = ax.legend(frameon=False, loc="upper center", ncol=3,
-                    bbox_to_anchor=(0.5, 1.02), title="Acquisition mode (identical MS-DIAL processing)",
+                    bbox_to_anchor=(0.5, 1.02), title=MODE_LEGEND_TITLE,
                     handlelength=1.2, handleheight=0.9, borderpad=0.0,
                     columnspacing=1.0, handletextpad=0.35, title_fontsize=6.5)
     leg.get_title().set_color(INK)
